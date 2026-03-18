@@ -1,3 +1,7 @@
+# ==========================================================
+# [broker.py]
+# ⚠️ 이 주석 및 파일명 표기는 절대 지우지 마세요.
+# ==========================================================
 import requests
 import json
 import time
@@ -7,19 +11,16 @@ import math
 import yfinance as yf
 
 class KoreaInvestmentBroker:
-    # 브로커 객체 초기화 (앱키, 시크릿키, 계좌번호 등 세팅)
     def __init__(self, app_key, app_secret, cano, acnt_prdt_cd="01"):
         self.app_key = app_key
         self.app_secret = app_secret
         self.cano = cano
         self.acnt_prdt_cd = acnt_prdt_cd
         self.base_url = "https://openapi.koreainvestment.com:9443"
-        # [V14.2] 토큰 파일을 data/ 폴더 하위에 생성하도록 변경
         self.token_file = f"data/token_{cano}.dat" 
         self.token = None
         self._get_access_token()
 
-    # KIS API 통신용 Oauth2 인증 토큰을 발급받거나 파일에서 불러옵니다.
     def _get_access_token(self, force=False):
         if not force and os.path.exists(self.token_file):
             try:
@@ -52,7 +53,6 @@ class KoreaInvestmentBroker:
         except Exception as e:
             print(f"❌ [Broker] 토큰 통신 에러: {e}")
 
-    # API 호출용 공통 헤더를 생성합니다.
     def _get_header(self, tr_id):
         return {
             "content-type": "application/json; charset=utf-8",
@@ -63,7 +63,6 @@ class KoreaInvestmentBroker:
             "custtype": "P"
         }
 
-    # 🛡️ [V15.2 안전장치] API 통신 중 토큰 만료(또는 오류) 발생 시 자동 감지 및 강제 재발급 후 재시도하는 래퍼 함수
     def _api_request(self, method, url, headers, params=None, data=None):
         for attempt in range(2): 
             try:
@@ -141,6 +140,7 @@ class KoreaInvestmentBroker:
         
         return cash, holdings
 
+    # 🌟 [V17.6 패치] KIS API (HHDFS76200200) Fallback 적용
     def get_current_price(self, ticker, is_market_closed=False):
         try:
             stock = yf.Ticker(ticker)
@@ -149,19 +149,58 @@ class KoreaInvestmentBroker:
             if not hist.empty: return float(hist['Close'].iloc[-1])
             else: return float(stock.fast_info['last_price'])
         except Exception as e:
-            return 0.0
+            print(f"⚠️ [야후 파이낸스] 현재가 에러, 한투 API 우회 가동: {e}")
 
+        try:
+            excg_cd = "AMS" if ticker == "SOXL" else "NAS"
+            params = {"AUTH": "", "EXCD": excg_cd, "SYMB": ticker}
+            res = self._call_api("HHDFS76200200", "/uapi/overseas-price/v1/quotations/price", "GET", params=params)
+            if res.get('rt_cd') == '0':
+                return float(res.get('output', {}).get('last', 0.0))
+        except Exception as e:
+            print(f"❌ [한투 API] 현재가 우회 조회 실패: {e}")
+        return 0.0
+
+    # 🌟 [V17.6 패치] KIS API (HHDFS76200200) Fallback 적용
     def get_previous_close(self, ticker):
-        try: return yf.Ticker(ticker).fast_info['previous_close']
-        except: return 0.0
+        try: return float(yf.Ticker(ticker).fast_info['previous_close'])
+        except Exception as e:
+            print(f"⚠️ [야후 파이낸스] 전일종가 에러, 한투 API 우회 가동: {e}")
+
+        try:
+            excg_cd = "AMS" if ticker == "SOXL" else "NAS"
+            params = {"AUTH": "", "EXCD": excg_cd, "SYMB": ticker}
+            res = self._call_api("HHDFS76200200", "/uapi/overseas-price/v1/quotations/price", "GET", params=params)
+            if res.get('rt_cd') == '0':
+                return float(res.get('output', {}).get('base', 0.0))
+        except Exception as e:
+            print(f"❌ [한투 API] 전일종가 우회 조회 실패: {e}")
+        return 0.0
 
     def get_5day_ma(self, ticker):
         try:
             stock = yf.Ticker(ticker)
             hist = stock.history(period="10d") 
             if len(hist) >= 5: return float(hist['Close'][-5:].mean())
-            return 0.0
-        except: return 0.0
+        except Exception as e:
+            print(f"⚠️ [야후 파이낸스] MA5 에러, 한투 API 우회 가동: {e}")
+            
+        try:
+            excg_cd = "AMS" if ticker == "SOXL" else "NAS"
+            params = {
+                "AUTH": "", "EXCD": excg_cd, "SYMB": ticker,
+                "GUBN": "0", "BYMD": "", "MODP": "1"
+            }
+            res = self._call_api("HHDFS76240000", "/uapi/overseas-price/v1/quotations/dailyprice", "GET", params=params)
+            if res.get('rt_cd') == '0':
+                output2 = res.get('output2', [])
+                if isinstance(output2, list) and len(output2) >= 5:
+                    closes = [float(x['clos']) for x in output2[:5]]
+                    return sum(closes) / len(closes)
+        except Exception as e:
+            print(f"❌ [한투 API] MA5 우회 조회 실패: {e}")
+            
+        return 0.0
 
     def get_unfilled_orders(self, ticker):
         params = {"CANO": self.cano, "ACNT_PRDT_CD": self.acnt_prdt_cd, "OVRS_EXCG_CD": "NASD", "SORT_SQN": "DS", "CTX_AREA_FK100": "", "CTX_AREA_NK100": ""}
@@ -247,7 +286,6 @@ class KoreaInvestmentBroker:
                 break
         return valid_execs
 
-    # 🚀 [V15.7] 제네시스 역산 엔진 (액면분할 대비 서킷 브레이커 탑재)
     def get_genesis_ledger(self, ticker, limit_date_str=None):
         _, holdings = self.get_account_balance()
         if holdings is None: return None, 0, 0.0
@@ -266,7 +304,6 @@ class KoreaInvestmentBroker:
         while curr_qty > 0 and not genesis_reached:
             date_str = target_date.strftime('%Y%m%d')
             
-            # 액면분할 방어 서킷 브레이커: 스냅샷 기준 날짜를 넘어 과거로 갔는데도 수량이 남아있으면 중단
             if limit_date_str and date_str < limit_date_str:
                 return "CIRCUIT_BREAKER", final_qty, final_avg
                 
@@ -279,18 +316,16 @@ class KoreaInvestmentBroker:
                     exec_qty = int(float(ex.get('ft_ccld_qty', '0')))
                     exec_price = float(ex.get('ft_ccld_unpr3', '0'))
                     
-                    # 💡 [V15.4] 오버슈팅(Overshoot) 절단 로직
-                    # 이전 사이클의 물량까지 긁어와서 장부를 오염시키는 무한루프 버그를 원천 차단합니다.
                     record_qty = exec_qty
                     
-                    if side_cd == "02": # 매수 (과거로 가며 차감)
+                    if side_cd == "02": 
                         if curr_qty <= exec_qty: 
-                            record_qty = curr_qty # 남은 수량만큼만 딱 맞게 잘라서 기록!
+                            record_qty = curr_qty 
                             curr_qty = 0
                             genesis_reached = True
                         else:
                             curr_qty -= exec_qty
-                    else: # 매도 (과거로 가며 더함)
+                    else: 
                         curr_qty += exec_qty
                     
                     ledger_records.append({

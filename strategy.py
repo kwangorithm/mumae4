@@ -1,6 +1,8 @@
+# ==========================================================
+# [strategy.py]
+# ⚠️ 이 주석 및 파일명 표기는 절대 지우지 마세요.
+# ==========================================================
 import math
-import yfinance as yf
-import pandas as pd
 from datetime import datetime, timedelta
 
 class InfiniteStrategy:
@@ -9,41 +11,6 @@ class InfiniteStrategy:
 
     def _ceil(self, val): return math.ceil(val * 100) / 100.0
     def _floor(self, val): return math.floor(val * 100) / 100.0
-
-    def _get_ma5_yfinance(self, ticker):
-        try:
-            end_date = datetime.now()
-            start_date = end_date - timedelta(days=15)
-            
-            df = yf.download(
-                ticker, 
-                start=start_date.strftime('%Y-%m-%d'), 
-                end=end_date.strftime('%Y-%m-%d'), 
-                progress=False
-            )
-            
-            if df.empty:
-                print(f"  ❌ [야후 파이낸스] {ticker} 시세 데이터를 불러오지 못했습니다.")
-                return None
-                
-            if isinstance(df.columns, pd.MultiIndex):
-                close_prices = df['Close'][ticker]
-            else:
-                close_prices = df['Close']
-                
-            close_prices = close_prices.dropna()
-            last_5_days = close_prices.tail(5)
-            
-            if len(last_5_days) < 5:
-                print(f"  ⚠️ [경고] {ticker}의 5일치 영업일 데이터가 부족합니다.")
-                return None
-                
-            ma5_price = round(float(last_5_days.mean()), 2)
-            return ma5_price
-            
-        except Exception as e:
-            print(f"  ❌ [시스템 오류] 야후 파이낸스 MA5 계산 중 문제 발생: {e}")
-            return None
 
     def get_plan(self, ticker, current_price, avg_price, qty, prev_close, ma_5day=0.0, market_type="REG", available_cash=0, is_simulation=False, force_turbo_off=False):
         orders = []
@@ -105,11 +72,11 @@ class InfiniteStrategy:
         star_ratio = target_ratio - (target_ratio * depreciation_factor * t_val)
         
         if is_reverse:
-            yf_ma5 = self._get_ma5_yfinance(ticker)
-            if yf_ma5 is not None:
-                star_price = yf_ma5
-            else:
+            # 봇 블로킹 방어: 외부에서 전달받은 ma_5day 활용
+            if ma_5day > 0:
                 star_price = round(ma_5day, 2)
+            else:
+                star_price = round(avg_price, 2)
 
             active_tickers_count = len(self.cfg.get_active_tickers())
             if active_tickers_count == 0: active_tickers_count = 1

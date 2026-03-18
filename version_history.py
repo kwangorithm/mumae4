@@ -12,5 +12,6 @@ VERSION_HISTORY = [
     "V17.2 [2026.03.18] 텔레그램 과거 버전 명예의 전당 페이징(Pagination) 로직 도입: 글자 수 초과 에러 완벽 해결 및 메이저 버전별(V14~V17) 독립 페이지 이동 버튼(이전/다음) 적용 (수정: telegram_view, telegram_bot)",
     "V17.3 [2026.03.18] 리버스 모드 누적일(Day Count) 캘린더 방어막 적용: 주말 및 휴장일 허위 카운팅 원천 차단 (수정: config)",
     "V17.4 [2026.03.18] 방탄 아키텍처 4대 리스크 완벽 제거: JSON 동시접근 Lock 차단, YFinance 봇 멈춤 방어(KIS API 우회), 체결 실패 시 Lock 방지, 제네시스 평단가 결벽증 완화 (수정: main, broker, strategy, config, telegram_bot)",
-    "V17.5 [2026.03.18] 텔레그램 UI/UX 묵언수행 버그 픽스: 목표/복리율 입력 시 응답 누락(await) 해결 및 입력 프롬프트 한글화 적용 (수정: telegram_bot)"
+    "V17.5 [2026.03.18] 텔레그램 UI/UX 묵언수행 버그 픽스: 목표/복리율 입력 시 응답 누락(await) 해결 및 입력 프롬프트 한글화 적용 (수정: telegram_bot)",
+    "V17.6 [2026.03.18] 야후/한투 API 이중화 및 비동기 블로킹 방어 전면 확대 적용: 현재가 및 전일종가 호출 시 KIS API(HHDFS76200200) Fallback 추가 및 asyncio.to_thread 처리 (수정: broker, main, telegram_bot)"
 ]

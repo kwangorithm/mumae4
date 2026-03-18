@@ -1,8 +1,13 @@
+# ==========================================================
+# [main.py]
+# ⚠️ 이 주석 및 파일명 표기는 절대 지우지 마세요.
+# ==========================================================
 import os
 import logging
 import datetime
 import pytz
 import time
+import asyncio
 import pandas_market_calendars as mcal
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 from dotenv import load_dotenv
@@ -90,65 +95,78 @@ async def scheduled_premarket_monitor(context):
     if not (now.hour == target_hour and 0 <= now.minute < 30):
         return
 
-    cfg, broker, strategy = app_data['cfg'], app_data['broker'], app_data['strategy']
+    cfg, broker, strategy, tx_lock = app_data['cfg'], app_data['broker'], app_data['strategy'], app_data['tx_lock']
 
-    _, holdings = broker.get_account_balance()
-    if holdings is None: return 
+    async with tx_lock:
+        _, holdings = broker.get_account_balance()
+        if holdings is None: return 
 
-    for t in cfg.get_active_tickers():
-        h = holdings.get(t, {'qty': 0, 'avg': 0})
-        if int(h['qty']) == 0: continue 
+        for t in cfg.get_active_tickers():
+            h = holdings.get(t, {'qty': 0, 'avg': 0})
+            if int(h['qty']) == 0: continue 
 
-        curr_p = broker.get_current_price(t)
-        plan = strategy.get_plan(t, curr_p, float(h['avg']), int(h['qty']), broker.get_previous_close(t), market_type="PRE_CHECK")
-        
-        if plan['orders']:
-            msg = f"🌅 <b>[{t}] 대박! 프리마켓 목표 달성 🎉</b>\n⚡ 전량 익절 주문을 실행합니다!"
-            broker.cancel_all_orders_safe(t)
-            for o in plan['orders']:
-                res = broker.send_order(t, o['side'], o['qty'], o['price'], o['type'])
-                msg += f"\n└ {o['desc']}: {'✅' if res.get('rt_cd') == '0' else f'❌({res.get('msg1')})'}"
-            await context.bot.send_message(chat_id=context.job.chat_id, text=msg, parse_mode='HTML')
+            # 🌟 [V17.6 패치] 봇 블로킹 방어 (asyncio.to_thread 적용)
+            curr_p = await asyncio.to_thread(broker.get_current_price, t)
+            prev_c = await asyncio.to_thread(broker.get_previous_close, t)
+            
+            plan = strategy.get_plan(t, curr_p, float(h['avg']), int(h['qty']), prev_c, market_type="PRE_CHECK")
+            
+            if plan['orders']:
+                msg = f"🌅 <b>[{t}] 대박! 프리마켓 목표 달성 🎉</b>\n⚡ 전량 익절 주문을 실행합니다!"
+                broker.cancel_all_orders_safe(t)
+                for o in plan['orders']:
+                    res = broker.send_order(t, o['side'], o['qty'], o['price'], o['type'])
+                    msg += f"\n└ {o['desc']}: {'✅' if res.get('rt_cd') == '0' else f'❌({res.get('msg1')})'}"
+                await context.bot.send_message(chat_id=context.job.chat_id, text=msg, parse_mode='HTML')
 
 async def scheduled_regular_trade(context):
     if not is_market_open(): return
     chat_id = context.job.chat_id
     app_data = context.job.data
-    cfg, broker, strategy = app_data['cfg'], app_data['broker'], app_data['strategy']
+    cfg, broker, strategy, tx_lock = app_data['cfg'], app_data['broker'], app_data['strategy'], app_data['tx_lock']
     
     latest_version = cfg.get_latest_version()
     await context.bot.send_message(chat_id=chat_id, text=f"🌃 <b>[{app_data.get('target_hour')}:30] 다이내믹 스노우볼 {latest_version} 정규장 주문을 준비합니다.</b>", parse_mode='HTML')
     
-    cash, holdings = broker.get_account_balance()
-    if holdings is None:
-        await context.bot.send_message(chat_id=chat_id, text="❌ API 통신 오류로 계좌 정보를 불러오지 못해 정규장 주문을 취소합니다.", parse_mode='HTML')
-        return
+    async with tx_lock:
+        cash, holdings = broker.get_account_balance()
+        if holdings is None:
+            await context.bot.send_message(chat_id=chat_id, text="❌ API 통신 오류로 계좌 정보를 불러오지 못해 정규장 주문을 취소합니다.", parse_mode='HTML')
+            return
 
-    sorted_tickers, allocated_cash, force_turbo_off = get_budget_allocation(cash, cfg.get_active_tickers(), cfg)
-    
-    for t in sorted_tickers:
-        if cfg.check_lock(t, "REG"): continue
-        h = holdings.get(t, {'qty': 0, 'avg': 0})
+        sorted_tickers, allocated_cash, force_turbo_off = get_budget_allocation(cash, cfg.get_active_tickers(), cfg)
         
-        ma_5day = broker.get_5day_ma(t)
-        plan = strategy.get_plan(t, broker.get_current_price(t), float(h['avg']), int(h['qty']), broker.get_previous_close(t), ma_5day=ma_5day, market_type="REG", available_cash=allocated_cash[t], force_turbo_off=force_turbo_off)
-        
-        if plan['orders']:
-            is_rev = plan.get('is_reverse', False)
-            title = f"🔄 <b>[{t}] V14 리버스 주문 실행</b>\n" if is_rev else f"💎 <b>[{t}] 주문 실행</b>\n"
-            msg, success_count = title, 0
+        for t in sorted_tickers:
+            if cfg.check_lock(t, "REG"): continue
+            h = holdings.get(t, {'qty': 0, 'avg': 0})
             
-            for o in plan['orders']:
-                res = broker.send_order(t, o['side'], o['qty'], o['price'], o['type'])
-                is_success = res.get('rt_cd') == '0'
-                if is_success: success_count += 1
-                msg += f"└ {o['desc']} {o['qty']}주: {'✅' if is_success else f'❌({res.get('msg1')})'}\n"
+            # 🌟 [V17.6 패치] 봇 블로킹 방어 (asyncio.to_thread 적용)
+            curr_p = await asyncio.to_thread(broker.get_current_price, t)
+            prev_c = await asyncio.to_thread(broker.get_previous_close, t)
+            ma_5day = await asyncio.to_thread(broker.get_5day_ma, t)
             
-            if success_count > 0:
-                cfg.set_lock(t, "REG")
-                msg += "\n🔒 <b>주문 전송 완료 (매매 잠금 설정됨)</b>"
-                    
-            await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode='HTML')
+            plan = strategy.get_plan(t, curr_p, float(h['avg']), int(h['qty']), prev_c, ma_5day=ma_5day, market_type="REG", available_cash=allocated_cash[t], force_turbo_off=force_turbo_off)
+            
+            if plan['orders']:
+                is_rev = plan.get('is_reverse', False)
+                title = f"🔄 <b>[{t}] 리버스 주문 실행</b>\n" if is_rev else f"💎 <b>[{t}] 주문 실행</b>\n"
+                msg = title
+                
+                all_success = True
+                for o in plan['orders']:
+                    res = broker.send_order(t, o['side'], o['qty'], o['price'], o['type'])
+                    is_success = res.get('rt_cd') == '0'
+                    if not is_success:
+                        all_success = False
+                    msg += f"└ {o['desc']} {o['qty']}주: {'✅' if is_success else f'❌({res.get('msg1')})'}\n"
+                
+                if all_success and len(plan['orders']) > 0:
+                    cfg.set_lock(t, "REG")
+                    msg += "\n🔒 <b>모든 주문 정상 전송 완료 (매매 잠금 설정됨)</b>"
+                else:
+                    msg += "\n⚠️ <b>일부 주문 실패 감지 (매매 잠금 보류 - 다음 스케줄 재시도)</b>"
+                        
+                await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode='HTML')
 
 async def scheduled_auto_sync_summer(context):
     if not is_dst_active(): return 
@@ -181,7 +199,7 @@ def main():
     latest_version = cfg.get_latest_version() 
     
     print("=" * 50)
-    print(f"🚀 방치형 자동매매 {latest_version} (시스템 전면 리팩토링 최적화)")
+    print(f"🚀 방치형 자동매매 {latest_version} (방탄 아키텍처 적용 완료)")
     print(f"📅 날짜 정보: {season_msg}")
     print(f"⏰ 자동 동기화: 08:30(여름) / 09:30(겨울) 자동 변경")
     print(f"⏰ 정규장 주문: {TARGET_HOUR}:30")
@@ -190,7 +208,8 @@ def main():
     if ADMIN_CHAT_ID: cfg.set_chat_id(ADMIN_CHAT_ID)
     broker = KoreaInvestmentBroker(APP_KEY, APP_SECRET, CANO, ACNT_PRDT_CD)
     strategy = InfiniteStrategy(cfg)
-    bot = TelegramController(cfg, broker, strategy)
+    tx_lock = asyncio.Lock()
+    bot = TelegramController(cfg, broker, strategy, tx_lock)
     
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     
@@ -214,7 +233,7 @@ def main():
     
     if cfg.get_chat_id():
         jq = app.job_queue
-        app_data = {'cfg': cfg, 'broker': broker, 'strategy': strategy, 'target_hour': TARGET_HOUR, 'bot': bot}
+        app_data = {'cfg': cfg, 'broker': broker, 'strategy': strategy, 'target_hour': TARGET_HOUR, 'bot': bot, 'tx_lock': tx_lock}
         kst = pytz.timezone('Asia/Seoul')
         
         for tt in [datetime.time(7,0,tzinfo=kst), datetime.time(11,0,tzinfo=kst), datetime.time(16,30,tzinfo=kst), datetime.time(22,0,tzinfo=kst)]:
@@ -224,9 +243,7 @@ def main():
         jq.run_daily(scheduled_auto_sync_winter, time=datetime.time(9, 30, tzinfo=kst), days=tuple(range(7)), chat_id=cfg.get_chat_id(), data=app_data)
         
         jq.run_daily(scheduled_force_reset, time=datetime.time(TARGET_HOUR, 0, tzinfo=kst), days=(0,1,2,3,4), chat_id=cfg.get_chat_id(), data=app_data)
-        
         jq.run_repeating(scheduled_premarket_monitor, interval=60, chat_id=cfg.get_chat_id(), data=app_data)
-            
         jq.run_daily(scheduled_regular_trade, time=datetime.time(TARGET_HOUR, 30, tzinfo=kst), days=(0,1,2,3,4), chat_id=cfg.get_chat_id(), data=app_data)
         
     app.run_polling()

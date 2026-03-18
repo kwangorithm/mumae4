@@ -134,9 +134,10 @@ class TelegramController:
 
         for t in sorted_tickers:
             h = holdings.get(t, {'qty':0, 'avg':0})
-            curr = self.broker.get_current_price(t, is_market_closed=(status_code == "CLOSE"))
-            prev_close = self.broker.get_previous_close(t)
             
+            # 🌟 [V17.6 패치] 봇 블로킹 방어 (asyncio.to_thread 적용)
+            curr = await asyncio.to_thread(self.broker.get_current_price, t, is_market_closed=(status_code == "CLOSE"))
+            prev_close = await asyncio.to_thread(self.broker.get_previous_close, t)
             ma_5day = await asyncio.to_thread(self.broker.get_5day_ma, t)
             
             plan = self.strategy.get_plan(
@@ -229,7 +230,8 @@ class TelegramController:
                     if ledger_qty > 0:
                         kst = pytz.timezone('Asia/Seoul')
                         today_str = datetime.datetime.now(kst).strftime('%Y-%m-%d')
-                        prev_c = self.broker.get_previous_close(ticker)
+                        # 🌟 [V17.6 패치] 봇 블로킹 방어 (asyncio.to_thread 적용)
+                        prev_c = await asyncio.to_thread(self.broker.get_previous_close, ticker)
                         
                         new_hist, added_seed = self.cfg.archive_graduation(ticker, today_str, prev_c)
                         
@@ -553,8 +555,12 @@ class TelegramController:
                 _, allocated_cash, force_turbo_off = self._calculate_budget_allocation(cash, self.cfg.get_active_tickers())
                 h = holdings.get(t, {'qty':0, 'avg':0})
                 
+                # 🌟 [V17.6 패치] 봇 블로킹 방어 (asyncio.to_thread 적용)
+                curr_p = await asyncio.to_thread(self.broker.get_current_price, t)
+                prev_c = await asyncio.to_thread(self.broker.get_previous_close, t)
                 ma_5day = await asyncio.to_thread(self.broker.get_5day_ma, t)
-                plan = self.strategy.get_plan(t, self.broker.get_current_price(t), float(h['avg']), int(h['qty']), self.broker.get_previous_close(t), ma_5day=ma_5day, market_type="REG", available_cash=allocated_cash[t], force_turbo_off=force_turbo_off)
+                
+                plan = self.strategy.get_plan(t, curr_p, float(h['avg']), int(h['qty']), prev_c, ma_5day=ma_5day, market_type="REG", available_cash=allocated_cash[t], force_turbo_off=force_turbo_off)
                 
                 is_rev = plan.get('is_reverse', False)
                 ver = self.cfg.get_version(t)
@@ -603,8 +609,6 @@ class TelegramController:
         elif action == "INPUT":
             ticker = data[2]
             self.user_states[update.effective_chat.id] = f"CONF_{sub}_{ticker}"
-            
-            # 🌟 [V17.5 패치] 사용자 친화적인 한글 안내 멘트로 변환
             ko_name = "분할 횟수" if sub == "SPLIT" else ("목표 수익률(%)" if sub == "TARGET" else "자동 복리율(%)")
             await context.bot.send_message(update.effective_chat.id, f"⚙️ [{ticker}] {ko_name} 값 입력 (숫자만):")
 
@@ -634,13 +638,11 @@ class TelegramController:
                 ticker = parts[2]
                 d = self.cfg._load_json(self.cfg.FILES["PROFIT_CFG"], self.cfg.DEFAULT_TARGET)
                 d[ticker] = val; self.cfg._save_json(self.cfg.FILES["PROFIT_CFG"], d)
-                # 🌟 [V17.5 패치] await 추가로 묵언수행 버그 해결
                 await update.message.reply_text(f"✅ [{ticker}] 목표: {val}%")
                 
             elif state.startswith("CONF_COMPOUND"):
                 ticker = parts[2]
                 self.cfg.set_compound_rate(ticker, val)
-                # 🌟 [V17.5 패치] await 추가로 묵언수행 버그 해결
                 await update.message.reply_text(f"✅ [{ticker}] 졸업 시 자동 복리율: {val}%")
                 
             del self.user_states[chat_id]
