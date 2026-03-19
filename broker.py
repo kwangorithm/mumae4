@@ -1,395 +1,404 @@
-import os
-import logging
-import datetime
-import pytz
+# ==========================================================
+# [broker.py]
+# ⚠️ 이 주석 및 파일명 표기는 절대 지우지 마세요.
+# ==========================================================
+import requests
+import json
 import time
+import datetime
+import os
 import math
-import asyncio
-import pandas_market_calendars as mcal
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
-from dotenv import load_dotenv
+import yfinance as yf
 
-from config import ConfigManager
-from strategy import InfiniteStrategy
-from telegram_bot import TelegramController
+class KoreaInvestmentBroker:
+    def __init__(self, app_key, app_secret, cano, acnt_prdt_cd="01"):
+        self.app_key = app_key
+        self.app_secret = app_secret
+        self.cano = cano
+        self.acnt_prdt_cd = acnt_prdt_cd
+        self.base_url = "https://openapi.koreainvestment.com:9443"
+        self.token_file = f"data/token_{cano}.dat" 
+        self.token = None
+        self._get_access_token()
 
-if not os.path.exists('data'):
-    os.makedirs('data')
-if not os.path.exists('logs'):
-    os.makedirs('logs')
+    def _get_access_token(self, force=False):
+        if not force and os.path.exists(self.token_file):
+            try:
+                with open(self.token_file, 'r') as f:
+                    saved = json.load(f)
+                expire_time = datetime.datetime.strptime(saved['expire'], '%Y-%m-%d %H:%M:%S')
+                if expire_time > datetime.datetime.now() + datetime.timedelta(hours=1):
+                    self.token = saved['token']
+                    return
+            except: pass
 
-load_dotenv() 
+        if force and os.path.exists(self.token_file):
+            try: os.remove(self.token_file)
+            except: pass
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID")) if os.getenv("ADMIN_CHAT_ID") else None
-APP_KEY = os.getenv("APP_KEY")
-APP_SECRET = os.getenv("APP_SECRET")
-CANO = os.getenv("CANO")
-ACNT_PRDT_CD = os.getenv("ACNT_PRDT_CD", "01")
-
-log_filename = f"logs/bot_app_{datetime.datetime.now().strftime('%Y%m%d')}.log"
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', 
-    level=logging.INFO,
-    handlers=[
-        logging.FileHandler(log_filename, encoding='utf-8'),
-        logging.StreamHandler()
-    ]
-)
-
-def is_dst_active():
-    est = pytz.timezone('US/Eastern')
-    return datetime.datetime.now(est).dst() != datetime.timedelta(0)
-
-def get_target_hour():
-    return (17, "🌞 서머타임 적용(여름)") if is_dst_active() else (18, "❄️ 서머타임 해제(겨울)")
-
-def is_market_open():
-    est = pytz.timezone('US/Eastern')
-    today = datetime.datetime.now(est).date()
-    nyse = mcal.get_calendar('NYSE')
-    return not nyse.schedule(start_date=today, end_date=today).empty
-
-def get_budget_allocation(cash, tickers, cfg):
-    sorted_tickers = sorted(tickers, key=lambda x: 0 if x == "SOXL" else (1 if x == "TQQQ" else 2))
-    total_req, portions = 0, {}
-    
-    for tx in sorted_tickers:
-        split = cfg.get_split_count(tx)
-        portion = cfg.get_seed(tx) / split if split > 0 else 0
-        portions[tx] = portion
-        total_req += portion
+        url = f"{self.base_url}/oauth2/tokenP"
+        body = {"grant_type": "client_credentials", "appkey": self.app_key, "appsecret": self.app_secret}
         
-    force_turbo_off = cash < total_req
-    rem_cash, allocated = cash, {}
-    
-    for tx in sorted_tickers:
-        if rem_cash >= portions[tx]:
-            allocated[tx] = rem_cash 
-            rem_cash -= portions[tx] 
-        else: allocated[tx] = 0 
-            
-    return sorted_tickers, allocated, force_turbo_off
-
-async def scheduled_token_check(context):
-    context.job.data['broker']._get_access_token(force=True)
-
-async def scheduled_force_reset(context):
-    if not is_market_open(): return
-    app_data = context.job.data
-    app_data['cfg'].reset_locks()
-    await context.bot.send_message(chat_id=context.job.chat_id, text=f"🔓 <b>[{app_data.get('target_hour')}:00] 시스템 초기화 완료 (매매 잠금 해제)</b>", parse_mode='HTML')
-
-async def scheduled_premarket_monitor(context):
-    if not is_market_open(): return
-    app_data = context.job.data
-    
-    kst = pytz.timezone('Asia/Seoul')
-    now = datetime.datetime.now(kst)
-    target_hour = app_data.get('target_hour', 18)
-    
-    if not (now.hour == target_hour and 0 <= now.minute < 30):
-        return
-
-    cfg, broker, strategy, tx_lock = app_data['cfg'], app_data['broker'], app_data['strategy'], app_data['tx_lock']
-
-    async with tx_lock:
-        _, holdings = broker.get_account_balance()
-        if holdings is None: return 
-
-        for t in cfg.get_active_tickers():
-            h = holdings.get(t, {'qty': 0, 'avg': 0})
-            if int(h['qty']) == 0: continue 
-
-            curr_p = await asyncio.to_thread(broker.get_current_price, t)
-            prev_c = await asyncio.to_thread(broker.get_previous_close, t)
-            
-            plan = strategy.get_plan(t, curr_p, float(h['avg']), int(h['qty']), prev_c, market_type="PRE_CHECK")
-            
-            if plan['orders']:
-                msg = f"🌅 <b>[{t}] 대박! 프리마켓 목표 달성 🎉</b>\n⚡ 전량 익절 주문을 실행합니다!"
-                broker.cancel_all_orders_safe(t)
-                for o in plan['orders']:
-                    res = broker.send_order(t, o['side'], o['qty'], o['price'], o['type'])
-                    msg += f"\n└ {o['desc']}: {'✅' if res.get('rt_cd') == '0' else f'❌({res.get('msg1')})'}"
-                    await asyncio.sleep(0.2) 
-                await context.bot.send_message(chat_id=context.job.chat_id, text=msg, parse_mode='HTML')
-
-async def scheduled_sniper_monitor(context):
-    if not is_market_open(): return
-    
-    est = pytz.timezone('US/Eastern')
-    now_est = datetime.datetime.now(est)
-    nyse = mcal.get_calendar('NYSE')
-    schedule = nyse.schedule(start_date=now_est.date(), end_date=now_est.date())
-    if schedule.empty: return
-    
-    market_open = schedule.iloc[0]['market_open'].astimezone(est)
-    market_close = schedule.iloc[0]['market_close'].astimezone(est)
-    
-    pre_start = market_open.replace(hour=4, minute=0)
-    start_monitor = pre_start + datetime.timedelta(minutes=1)
-    end_monitor = market_close - datetime.timedelta(minutes=15)
-    
-    if not (start_monitor <= now_est <= end_monitor):
-        return
-
-    app_data = context.job.data
-    cfg, broker, strategy, tx_lock = app_data['cfg'], app_data['broker'], app_data['strategy'], app_data['tx_lock']
-    chat_id = context.job.chat_id
-    
-    async with tx_lock:
-        cash, holdings = broker.get_account_balance()
-        if holdings is None: return
-        
-        # 가용 예산 재계산 (스마트 매수 세팅을 위해 필요)
-        sorted_tickers, allocated_cash, force_turbo_off = get_budget_allocation(cash, cfg.get_active_tickers(), cfg)
-        
-        for t in cfg.get_active_tickers():
-            if cfg.get_version(t) != "V17": continue
-            if cfg.check_lock(t, "SNIPER"): continue 
-            
-            h = holdings.get(t, {'qty': 0, 'avg': 0})
-            qty = int(h['qty'])
-            avg_price = float(h['avg'])
-            if qty == 0: continue
-            
-            curr_p = await asyncio.to_thread(broker.get_current_price, t)
-            prev_c = await asyncio.to_thread(broker.get_previous_close, t)
-            if curr_p <= 0: continue
-            
-            target_pct_val = cfg.get_target_profit(t)
-            target_price = math.ceil(avg_price * (1 + target_pct_val / 100.0) * 100) / 100.0
-            
-            split = cfg.get_split_count(t)
-            t_val, _ = cfg.get_absolute_t_val(t, qty, avg_price)
-            
-            depreciation_factor = 2.0 / split if split > 0 else 0.1
-            star_ratio = (target_pct_val / 100.0) - ((target_pct_val / 100.0) * depreciation_factor * t_val)
-            star_price = math.ceil(avg_price * (1 + star_ratio) * 100) / 100.0
-            
-            # 1. 잭팟 (전량 익절)
-            if curr_p >= target_price:
-                await asyncio.to_thread(broker.cancel_all_orders_safe, t)
-                res = broker.send_order(t, "SELL", qty, curr_p, "LIMIT")
-                if res.get('rt_cd') == '0':
-                    cfg.set_lock(t, "SNIPER")
-                    msg = f"🔥 <b>[{t}] 스나이퍼 잭팟 터짐! (목표가 돌파)</b>\n"
-                    msg += f"🎯 실시간 현재가(${curr_p:.2f})가 목표가(${target_price:.2f})를 돌파하여 <b>전량 강제 익절</b> 처리했습니다.\n"
-                    msg += "🔫 당일 스나이퍼 활동을 완전 종료합니다."
-                    await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode='HTML')
-                continue
-            
-            # 2. 쿼터 익절 (스나이퍼)
-            is_first_half = t_val < (split / 2)
-            trigger_price = star_price if is_first_half else math.ceil(avg_price * 1.0025 * 100) / 100.0
-            
-            if curr_p >= trigger_price:
-                unfilled = await asyncio.to_thread(broker.get_unfilled_orders_detail, t)
-                target_odno = None
+        try:
+            res = requests.post(url, headers={"content-type": "application/json"}, data=json.dumps(body))
+            data = res.json()
+            if 'access_token' in data:
+                self.token = data['access_token']
+                expire_str = (datetime.datetime.now() + datetime.timedelta(seconds=int(data['expires_in']))).strftime('%Y-%m-%d %H:%M:%S')
                 
-                # 기존에 깔려있던 방어용 매도(SELL) 주문 찾기
-                for o in unfilled:
-                    if o.get('sll_buy_dvsn_cd') == '01': 
-                        target_odno = o.get('odno')
+                with open(self.token_file, 'w') as f:
+                    json.dump({'token': self.token, 'expire': expire_str}, f)
+            else:
+                print(f"❌ [Broker] 토큰 발급 실패: {data.get('error_description', '알 수 없는 오류')}")
+        except Exception as e:
+            print(f"❌ [Broker] 토큰 통신 에러: {e}")
+
+    def _get_header(self, tr_id):
+        return {
+            "content-type": "application/json; charset=utf-8",
+            "authorization": f"Bearer {self.token}",
+            "appkey": self.app_key,
+            "appsecret": self.app_secret,
+            "tr_id": tr_id,
+            "custtype": "P"
+        }
+
+    def _api_request(self, method, url, headers, params=None, data=None):
+        for attempt in range(2): 
+            try:
+                if method.upper() == "GET":
+                    res = requests.get(url, headers=headers, params=params)
+                else:
+                    res = requests.post(url, headers=headers, data=json.dumps(data) if data else None)
+                    
+                resp_json = res.json()
+                
+                if resp_json.get('rt_cd') != '0':
+                    msg1 = resp_json.get('msg1', '')
+                    if any(x in msg1.lower() for x in ['토큰', '접근토큰', 'token', 'expired', 'mig', '인증', 'authorization']):
+                        if attempt == 0: 
+                            print(f"\n🚨 [안전장치 가동] API 토큰 만료 감지! : {msg1}")
+                            self._get_access_token(force=True)
+                            headers["authorization"] = f"Bearer {self.token}"
+                            time.sleep(1.0)
+                            continue
+                return res, resp_json
+            except Exception as e:
+                print(f"⚠️ API 통신 중 예외 발생: {e}")
+                if attempt == 1: return None, {}
+                time.sleep(1.0)
+        return None, {}
+
+    def _call_api(self, tr_id, url_path, method="GET", params=None, body=None):
+        headers = self._get_header(tr_id)
+        url = f"{self.base_url}{url_path}"
+        res, resp_json = self._api_request(method, url, headers, params=params, data=body)
+        if not resp_json: return {'rt_cd': '999', 'msg1': '통신 오류 또는 최대 재시도 횟수 초과'}
+        return resp_json
+
+    def _ceil_2(self, value):
+        if value is None: return 0.0
+        return math.ceil(value * 100) / 100.0
+
+    def _safe_float(self, value):
+        try: return float(str(value).replace(',', ''))
+        except: return 0.0
+
+    def get_account_balance(self):
+        cash = 0.0
+        holdings = None 
+        
+        params = {"CANO": self.cano, "ACNT_PRDT_CD": self.acnt_prdt_cd, "WCRC_FRCR_DVSN_CD": "02", "NATN_CD": "840", "TR_MKET_CD": "00", "INQR_DVSN_CD": "00"}
+        res = self._call_api("CTRP6504R", "/uapi/overseas-stock/v1/trading/inquire-present-balance", "GET", params=params)
+        
+        if res.get('rt_cd') == '0':
+            o2 = res.get('output2', {})
+            if isinstance(o2, list) and len(o2) > 0: o2 = o2[0]
+            
+            dncl_amt = self._safe_float(o2.get('frcr_dncl_amt_2', 0))       
+            sll_amt = self._safe_float(o2.get('frcr_sll_amt_smtl', 0))      
+            buy_amt = self._safe_float(o2.get('frcr_buy_amt_smtl', 0))      
+            
+            raw_bp = dncl_amt + sll_amt - buy_amt
+            cash = math.floor((raw_bp * 0.9945) * 100) / 100.0              
+
+        params_hold = {"CANO": self.cano, "ACNT_PRDT_CD": self.acnt_prdt_cd, "OVRS_EXCG_CD": "NASD", "TR_CRCY_CD": "USD", "CTX_AREA_FK200": "", "CTX_AREA_NK200": ""}
+        res = self._call_api("TTTS3012R", "/uapi/overseas-stock/v1/trading/inquire-balance", "GET", params_hold)
+        
+        if res.get('rt_cd') == '0':
+            holdings = {} 
+            if cash <= 0:
+                o2 = res.get('output2', {})
+                if isinstance(o2, list) and len(o2) > 0: o2 = o2[0]
+                cash = self._safe_float(o2.get('ovrs_ord_psbl_amt', 0))
+            
+            for item in res.get('output1', []):
+                ticker = item.get('ovrs_pdno')
+                qty = int(self._safe_float(item.get('ovrs_cblc_qty', 0)))
+                avg = self._safe_float(item.get('pchs_avg_pric', 0))
+                if qty > 0: holdings[ticker] = {'qty': qty, 'avg': avg}
+        
+        return cash, holdings
+
+    def get_current_price(self, ticker, is_market_closed=False):
+        try:
+            stock = yf.Ticker(ticker)
+            if is_market_closed: return float(stock.fast_info['last_price'])
+            hist = stock.history(period="1d", interval="1m", prepost=True)
+            if not hist.empty: return float(hist['Close'].iloc[-1])
+            else: return float(stock.fast_info['last_price'])
+        except Exception as e:
+            print(f"⚠️ [야후 파이낸스] 현재가 에러, 한투 API 우회 가동: {e}")
+
+        try:
+            excg_cd = "AMS" if ticker == "SOXL" else "NAS"
+            params = {"AUTH": "", "EXCD": excg_cd, "SYMB": ticker}
+            res = self._call_api("HHDFS76200200", "/uapi/overseas-price/v1/quotations/price", "GET", params=params)
+            if res.get('rt_cd') == '0':
+                return float(res.get('output', {}).get('last', 0.0))
+        except Exception as e:
+            print(f"❌ [한투 API] 현재가 우회 조회 실패: {e}")
+        return 0.0
+
+    def get_previous_close(self, ticker):
+        try: return float(yf.Ticker(ticker).fast_info['previous_close'])
+        except Exception as e:
+            print(f"⚠️ [야후 파이낸스] 전일종가 에러, 한투 API 우회 가동: {e}")
+
+        try:
+            excg_cd = "AMS" if ticker == "SOXL" else "NAS"
+            params = {"AUTH": "", "EXCD": excg_cd, "SYMB": ticker}
+            res = self._call_api("HHDFS76200200", "/uapi/overseas-price/v1/quotations/price", "GET", params=params)
+            if res.get('rt_cd') == '0':
+                return float(res.get('output', {}).get('base', 0.0))
+        except Exception as e:
+            print(f"❌ [한투 API] 전일종가 우회 조회 실패: {e}")
+        return 0.0
+
+    def get_5day_ma(self, ticker):
+        try:
+            stock = yf.Ticker(ticker)
+            hist = stock.history(period="10d") 
+            if len(hist) >= 5: return float(hist['Close'][-5:].mean())
+        except Exception as e:
+            print(f"⚠️ [야후 파이낸스] MA5 에러, 한투 API 우회 가동: {e}")
+            
+        try:
+            excg_cd = "AMS" if ticker == "SOXL" else "NAS"
+            params = {
+                "AUTH": "", "EXCD": excg_cd, "SYMB": ticker,
+                "GUBN": "0", "BYMD": "", "MODP": "1"
+            }
+            res = self._call_api("HHDFS76240000", "/uapi/overseas-price/v1/quotations/dailyprice", "GET", params=params)
+            if res.get('rt_cd') == '0':
+                output2 = res.get('output2', [])
+                if isinstance(output2, list) and len(output2) >= 5:
+                    closes = [float(x['clos']) for x in output2[:5]]
+                    return sum(closes) / len(closes)
+        except Exception as e:
+            print(f"❌ [한투 API] MA5 우회 조회 실패: {e}")
+            
+        return 0.0
+
+    def get_bb_lower(self, ticker):
+        try:
+            stock = yf.Ticker(ticker)
+            hist = stock.history(period="20d") 
+            if len(hist) >= 20: 
+                ma20 = float(hist['Close'].mean())
+                std20 = float(hist['Close'].std())
+                return float(ma20 - (std20 * 2))
+        except Exception as e:
+            print(f"⚠️ [야후 파이낸스] BB 하한선 에러, 한투 API 우회 가동: {e}")
+            
+        try:
+            excg_cd = "AMS" if ticker == "SOXL" else "NAS"
+            params = {
+                "AUTH": "", "EXCD": excg_cd, "SYMB": ticker,
+                "GUBN": "0", "BYMD": "", "MODP": "1"
+            }
+            res = self._call_api("HHDFS76240000", "/uapi/overseas-price/v1/quotations/dailyprice", "GET", params=params)
+            if res.get('rt_cd') == '0':
+                output2 = res.get('output2', [])
+                if isinstance(output2, list) and len(output2) >= 20:
+                    closes = [float(x['clos']) for x in output2[:20]]
+                    ma20 = sum(closes) / 20.0
+                    variance = sum([((x - ma20) ** 2) for x in closes]) / 19.0
+                    std20 = math.sqrt(variance)
+                    return float(ma20 - (std20 * 2))
+        except Exception as e:
+            print(f"❌ [한투 API] BB 하한선 우회 조회 실패: {e}")
+            
+        return 0.0
+
+    def get_unfilled_orders(self, ticker):
+        excg_cd = "AMEX" if ticker == "SOXL" else "NASD"
+        params = {"CANO": self.cano, "ACNT_PRDT_CD": self.acnt_prdt_cd, "OVRS_EXCG_CD": excg_cd, "SORT_SQN": "DS", "CTX_AREA_FK200": "", "CTX_AREA_NK200": ""}
+        res = self._call_api("TTTS3018R", "/uapi/overseas-stock/v1/trading/inquire-nccs", "GET", params=params)
+        if res.get('rt_cd') == '0':
+            output = res.get('output', [])
+            if isinstance(output, dict): output = [output]
+            return [item.get('odno') for item in output if item.get('pdno') == ticker]
+        return []
+
+    def get_unfilled_orders_detail(self, ticker):
+        excg_cd = "AMEX" if ticker == "SOXL" else "NASD"
+        params = {"CANO": self.cano, "ACNT_PRDT_CD": self.acnt_prdt_cd, "OVRS_EXCG_CD": excg_cd, "SORT_SQN": "DS", "CTX_AREA_FK200": "", "CTX_AREA_NK200": ""}
+        res = self._call_api("TTTS3018R", "/uapi/overseas-stock/v1/trading/inquire-nccs", "GET", params=params)
+        if res.get('rt_cd') == '0':
+            output = res.get('output', [])
+            if isinstance(output, dict): output = [output]
+            return [item for item in output if item.get('pdno') == ticker]
+        return []
+
+    def cancel_all_orders_safe(self, ticker, side=None):
+        for i in range(3):
+            orders = self.get_unfilled_orders_detail(ticker)
+            if not orders: return True
+            
+            target_orders = orders
+            if side == "BUY":
+                target_orders = [o for o in orders if o.get('sll_buy_dvsn_cd') == '02']
+            elif side == "SELL":
+                target_orders = [o for o in orders if o.get('sll_buy_dvsn_cd') == '01']
+                
+            if not target_orders: return True
+            
+            for o in target_orders: 
+                self.cancel_order(ticker, o.get('odno'))
+            time.sleep(5)
+            
+        final_orders = self.get_unfilled_orders_detail(ticker)
+        if side == "BUY":
+            return not any(o.get('sll_buy_dvsn_cd') == '02' for o in final_orders)
+        elif side == "SELL":
+            return not any(o.get('sll_buy_dvsn_cd') == '01' for o in final_orders)
+        return not bool(final_orders)
+
+    def send_order(self, ticker, side, qty, price, order_type="LIMIT"):
+        tr_id = "TTTT1002U" if side == "BUY" else "TTTT1006U"
+        excg_cd = "AMEX" if ticker == "SOXL" else "NASD"
+
+        if order_type == "LOC": ord_dvsn = "34"
+        elif order_type == "MOC": ord_dvsn = "33"
+        elif order_type == "LOO": ord_dvsn = "02"
+        elif order_type == "MOO": ord_dvsn = "31"
+        else: ord_dvsn = "00"
+
+        final_price = self._ceil_2(price)
+        if order_type in ["MOC", "MOO"]: final_price = 0
+        
+        body = {
+            "CANO": self.cano, "ACNT_PRDT_CD": self.acnt_prdt_cd, "OVRS_EXCG_CD": excg_cd,
+            "PDNO": ticker, "ORD_QTY": str(int(qty)), "OVRS_ORD_UNPR": str(final_price),
+            "ORD_SVR_DVSN_CD": "0", "ORD_DVSN": ord_dvsn 
+        }
+        res = self._call_api(tr_id, "/uapi/overseas-stock/v1/trading/order", "POST", body=body)
+        return {'rt_cd': res.get('rt_cd'), 'msg1': res.get('msg1')}
+
+    def cancel_order(self, ticker, order_id):
+        excg_cd = "AMEX" if ticker == "SOXL" else "NASD"
+        body = {
+            "CANO": self.cano, "ACNT_PRDT_CD": self.acnt_prdt_cd, "OVRS_EXCG_CD": excg_cd,
+            "PDNO": ticker, "ORGN_ODNO": order_id, "RVSE_CNCL_DVSN_CD": "02",
+            "ORD_QTY": "0", "OVRS_ORD_UNPR": "0", "ORD_SVR_DVSN_CD": "0"
+        }
+        self._call_api("TTTT1004U", "/uapi/overseas-stock/v1/trading/order-rvsecncl", "POST", body=body)
+
+    def get_execution_history(self, ticker, start_date, end_date):
+        excg_cd = "AMEX" if ticker == "SOXL" else "NASD"
+        valid_execs = []
+        fk200 = ""
+        nk200 = ""
+        
+        for attempt in range(10): 
+            params = {
+                "CANO": self.cano, "ACNT_PRDT_CD": self.acnt_prdt_cd, "PDNO": ticker,
+                "ORD_STRT_DT": start_date, "ORD_END_DT": end_date, "SLL_BUY_DVSN": "00",      
+                "CCLD_NCCS_DVSN": "00", "OVRS_EXCG_CD": excg_cd, "SORT_SQN": "DS",
+                "ORD_DT": "", "ORD_GNO_BRNO": "", "ODNO": "", "CTX_AREA_FK200": fk200, "CTX_AREA_NK200": nk200
+            }
+            
+            headers = self._get_header("TTTS3035R")
+            url = f"{self.base_url}/uapi/overseas-stock/v1/trading/inquire-ccnl"
+            res, resp_json = self._api_request("GET", url, headers, params=params)
+            
+            if res and resp_json.get('rt_cd') == '0':
+                output = resp_json.get('output', [])
+                if isinstance(output, dict): output = [output] 
+                for item in output:
+                    if float(item.get('ft_ccld_qty', '0')) > 0:
+                        valid_execs.append(item)
+                        
+                tr_cont = res.headers.get('tr_cont', '')
+                fk200 = resp_json.get('ctx_area_fk200', '').strip()
+                nk200 = resp_json.get('ctx_area_nk200', '').strip()
+                
+                if tr_cont in ['M', 'F'] and nk200:
+                    time.sleep(0.3) 
+                    continue
+                else: break 
+            else:
+                error_msg = resp_json.get('msg1') if resp_json else "응답 없음"
+                print(f"❌ [{ticker} 체결내역 오류] {error_msg}")
+                break
+        return valid_execs
+
+    def get_genesis_ledger(self, ticker, limit_date_str=None):
+        _, holdings = self.get_account_balance()
+        if holdings is None: return None, 0, 0.0
+            
+        ticker_info = holdings.get(ticker, {'qty': 0, 'avg': 0.0})
+        curr_qty = int(ticker_info.get('qty', 0))
+        final_qty = curr_qty
+        final_avg = float(ticker_info.get('avg', 0.0))
+        
+        if curr_qty == 0: return [], 0, 0.0
+            
+        ledger_records = []
+        target_date = datetime.datetime.now()
+        genesis_reached = False
+        
+        while curr_qty > 0 and not genesis_reached:
+            date_str = target_date.strftime('%Y%m%d')
+            
+            if limit_date_str and date_str < limit_date_str:
+                return "CIRCUIT_BREAKER", final_qty, final_avg
+                
+            execs = self.get_execution_history(ticker, date_str, date_str)
+            
+            if execs:
+                execs.sort(key=lambda x: x.get('ord_tmd', '000000'), reverse=True)
+                for ex in execs:
+                    side_cd = ex.get('sll_buy_dvsn_cd')
+                    exec_qty = int(float(ex.get('ft_ccld_qty', '0')))
+                    exec_price = float(ex.get('ft_ccld_unpr3', '0'))
+                    
+                    record_qty = exec_qty
+                    
+                    if side_cd == "02": 
+                        if curr_qty <= exec_qty: 
+                            record_qty = curr_qty 
+                            curr_qty = 0
+                            genesis_reached = True
+                        else:
+                            curr_qty -= exec_qty
+                    else: 
+                        curr_qty += exec_qty
+                    
+                    ledger_records.append({
+                        'date': f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}",
+                        'side': "BUY" if side_cd == "02" else "SELL",
+                        'qty': record_qty,
+                        'price': exec_price
+                    })
+                    
+                    if genesis_reached:
                         break
                         
-                if target_odno:
-                    # 매도 주문 취소 후 현재가 쿼터 매도 (스나이퍼 발포!)
-                    await asyncio.to_thread(broker.cancel_order, t, target_odno)
-                    await asyncio.sleep(1.0) 
-                    
-                    q_qty = math.ceil(qty / 4)
-                    res = broker.send_order(t, "SELL", q_qty, curr_p, "LIMIT")
-                    
-                    # 스나이퍼 발포가 성공했다면? => ★ 플랜 B(스마트 매수)로 전면 교체!
-                    if res.get('rt_cd') == '0':
-                        cfg.set_lock(t, "SNIPER")
-                        phase = "전반전(별값 돌파)" if is_first_half else "후반전(본전+수수료 돌파)"
-                        
-                        msg = f"🔫 <b>[{t}] V17 시크릿 쿼터 익절 발동! ({phase})</b>\n"
-                        msg += f"🎯 실시간 현재가: ${curr_p:.2f} (트리거: ${trigger_price:.2f})\n"
-                        msg += f"🛡️ 기존 방어선을 해제하고 {q_qty}주를 <b>지정가(LIMIT)</b>로 즉시 낚아챘습니다!\n"
-                        
-                        # --- 스마트 매수(플랜 B) 세팅 돌입 ---
-                        # 1) 남은 모든 '매수(BUY)' 주문 싹쓸이 취소
-                        await asyncio.to_thread(broker.cancel_all_orders_safe, t, side="BUY")
-                        await asyncio.sleep(1.0)
-                        
-                        # 2) strategy.py에서 방금 만든 '플랜 B' 가져오기
-                        ma_5day = await asyncio.to_thread(broker.get_5day_ma, t)
-                        plan = strategy.get_plan(t, curr_p, avg_price, qty, prev_c, ma_5day=ma_5day, market_type="REG", available_cash=allocated_cash[t], force_turbo_off=force_turbo_off)
-                        
-                        smart_cores = plan.get('smart_core_orders', [])
-                        smart_bonus = plan.get('smart_bonus_orders', [])
-                        
-                        if len(smart_cores) == 0:
-                            msg += "\n🛑 <b>[스마트 밸런싱 발동]</b>\n└ 전반전 종가 관망 모드로 전환 (오늘 추가 매수 안 함)"
-                        else:
-                            msg += "\n🦇 <b>[스마트 방어 매수 장전] (플랜 B 전환)</b>\n"
-                            # 필수 스마트 매수 전송
-                            for o in smart_cores:
-                                buy_res = broker.send_order(t, o['side'], o['qty'], o['price'], o['type'])
-                                msg += f"└ {o['desc']} {o['qty']}주: {'✅' if buy_res.get('rt_cd') == '0' else f'❌({buy_res.get('msg1')})'}\n"
-                                await asyncio.sleep(0.2)
-                            # 줍줍 스마트 매수 전송
-                            for o in smart_bonus:
-                                buy_res = broker.send_order(t, o['side'], o['qty'], o['price'], o['type'])
-                                msg += f"└ {o['desc']} {o['qty']}주: {'✅' if buy_res.get('rt_cd') == '0' else '❌'}\n"
-                                await asyncio.sleep(0.2)
-                        
-                        msg += "\n🔒 당일 스나이퍼 감시를 안전하게 종료합니다."
-                        await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode='HTML')
-
-async def scheduled_regular_trade(context):
-    if not is_market_open(): return
-    chat_id = context.job.chat_id
-    app_data = context.job.data
-    cfg, broker, strategy, tx_lock = app_data['cfg'], app_data['broker'], app_data['strategy'], app_data['tx_lock']
-    
-    latest_version = cfg.get_latest_version()
-    await context.bot.send_message(chat_id=chat_id, text=f"🌃 <b>[{app_data.get('target_hour')}:30] 다이내믹 스노우볼 {latest_version} 정규장 주문을 준비합니다.</b>", parse_mode='HTML')
-    
-    async with tx_lock:
-        cash, holdings = broker.get_account_balance()
-        if holdings is None:
-            await context.bot.send_message(chat_id=chat_id, text="❌ 계좌 정보를 불러오지 못해 정규장 주문을 취소합니다.", parse_mode='HTML')
-            return
-
-        sorted_tickers, allocated_cash, force_turbo_off = get_budget_allocation(cash, cfg.get_active_tickers(), cfg)
-        
-        plans = {}
-        msgs = {t: "" for t in sorted_tickers}
-        all_success = {t: True for t in sorted_tickers}
-
-        for t in sorted_tickers:
-            if cfg.check_lock(t, "REG"): continue
-            h = holdings.get(t, {'qty': 0, 'avg': 0})
-            
-            curr_p = await asyncio.to_thread(broker.get_current_price, t)
-            prev_c = await asyncio.to_thread(broker.get_previous_close, t)
-            ma_5day = await asyncio.to_thread(broker.get_5day_ma, t)
-            
-            plan = strategy.get_plan(t, curr_p, float(h['avg']), int(h['qty']), prev_c, ma_5day=ma_5day, market_type="REG", available_cash=allocated_cash[t], force_turbo_off=force_turbo_off)
-            plans[t] = plan
-            
-            if plan['orders']:
-                is_rev = plan.get('is_reverse', False)
-                title = f"🔄 <b>[{t}] 리버스 주문 실행 (교차 전송)</b>\n" if is_rev else f"💎 <b>[{t}] 정규장 주문 실행 (교차 전송)</b>\n"
-                msgs[t] += title
-
-        for t in sorted_tickers:
-            if t not in plans or not plans[t]['orders']: continue
-            for o in plans[t].get('core_orders', []):
-                res = broker.send_order(t, o['side'], o['qty'], o['price'], o['type'])
-                is_success = res.get('rt_cd') == '0'
-                if not is_success: all_success[t] = False
-                msgs[t] += f"└ 1차 필수: {o['desc']} {o['qty']}주: {'✅' if is_success else f'❌({res.get('msg1')})'}\n"
-                await asyncio.sleep(0.2) 
-
-        for t in sorted_tickers:
-            if t not in plans or not plans[t]['orders']: continue
-            for o in plans[t].get('bonus_orders', []):
-                res = broker.send_order(t, o['side'], o['qty'], o['price'], o['type'])
-                is_success = res.get('rt_cd') == '0'
-                msgs[t] += f"└ 2차 보너스: {o['desc']} {o['qty']}주: {'✅' if is_success else '❌(잔금패스)'}\n"
-                await asyncio.sleep(0.2) 
-
-        for t in sorted_tickers:
-            if t not in plans or not plans[t]['orders']: continue
-            
-            if all_success[t] and len(plans[t].get('core_orders', [])) > 0:
-                cfg.set_lock(t, "REG")
-                msgs[t] += "\n🔒 <b>필수 주문 정상 전송 완료 (잠금 설정됨)</b>"
-            elif not all_success[t]:
-                msgs[t] += "\n⚠️ <b>일부 필수 주문 실패 (매매 잠금 보류 - 다음 스케줄 재시도)</b>"
-            else:
-                cfg.set_lock(t, "REG")
-                msgs[t] += "\n🔒 <b>보너스 줍줍 주문만 전송 완료 (잠금 설정됨)</b>"
+            target_date -= datetime.timedelta(days=1)
+            time.sleep(0.1) 
+            if (datetime.datetime.now() - target_date).days > 365: break 
                 
-            await context.bot.send_message(chat_id=chat_id, text=msgs[t], parse_mode='HTML')
-
-async def scheduled_auto_sync_summer(context):
-    if not is_dst_active(): return 
-    await run_auto_sync(context, "08:30")
-
-async def scheduled_auto_sync_winter(context):
-    if is_dst_active(): return 
-    await run_auto_sync(context, "09:30")
-
-async def run_auto_sync(context, time_str):
-    chat_id = context.job.chat_id
-    bot = context.job.data['bot']
-    status_msg = await context.bot.send_message(chat_id=chat_id, text=f"📝 <b>[{time_str}] 장부 자동 동기화(무결성 검증)를 시작합니다.</b>", parse_mode='HTML')
-    
-    success_tickers = []
-    for t in context.job.data['cfg'].get_active_tickers():
-        res = await bot.process_auto_sync(t, chat_id, context, silent_ledger=True)
-        if res == "SUCCESS":
-            success_tickers.append(t)
-            
-    if success_tickers:
-        await bot._display_ledger(success_tickers[0], chat_id, context, message_obj=status_msg)
-    else:
-        await status_msg.edit_text(f"📝 <b>[{time_str}] 장부 동기화 완료</b> (표시할 진행 중인 장부가 없습니다)", parse_mode='HTML')
-
-def main():
-    TARGET_HOUR, season_msg = get_target_hour()
-    
-    cfg = ConfigManager()
-    latest_version = cfg.get_latest_version() 
-    
-    print("=" * 50)
-    print(f"🚀 방치형 자동매매 {latest_version} (방탄 아키텍처 적용 완료)")
-    print(f"📅 날짜 정보: {season_msg}")
-    print(f"⏰ 자동 동기화: 08:30(여름) / 09:30(겨울) 자동 변경")
-    print(f"⏰ 정규장 주문: {TARGET_HOUR}:30")
-    print("=" * 50)
-    
-    if ADMIN_CHAT_ID: cfg.set_chat_id(ADMIN_CHAT_ID)
-    broker = KoreaInvestmentBroker(APP_KEY, APP_SECRET, CANO, ACNT_PRDT_CD)
-    strategy = InfiniteStrategy(cfg)
-    tx_lock = asyncio.Lock()
-    bot = TelegramController(cfg, broker, strategy, tx_lock)
-    
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
-    
-    for cmd, handler in [
-        ("start", bot.cmd_start), 
-        ("record", bot.cmd_record), 
-        ("history", bot.cmd_history), 
-        ("sync", bot.cmd_sync), 
-        ("settlement", bot.cmd_settlement), 
-        ("seed", bot.cmd_seed), 
-        ("ticker", bot.cmd_ticker), 
-        ("mode", bot.cmd_mode), 
-        ("reset", bot.cmd_reset), 
-        ("version", bot.cmd_version),
-        ("v17", bot.cmd_v17),
-        ("v4", bot.cmd_v4)
-    ]:
-        app.add_handler(CommandHandler(cmd, handler))
-    app.add_handler(CallbackQueryHandler(bot.handle_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_message))
-    
-    if cfg.get_chat_id():
-        jq = app.job_queue
-        app_data = {'cfg': cfg, 'broker': broker, 'strategy': strategy, 'target_hour': TARGET_HOUR, 'bot': bot, 'tx_lock': tx_lock}
-        kst = pytz.timezone('Asia/Seoul')
-        
-        for tt in [datetime.time(7,0,tzinfo=kst), datetime.time(11,0,tzinfo=kst), datetime.time(16,30,tzinfo=kst), datetime.time(22,0,tzinfo=kst)]:
-            jq.run_daily(scheduled_token_check, time=tt, days=tuple(range(7)), data=app_data)
-        
-        jq.run_daily(scheduled_auto_sync_summer, time=datetime.time(8, 30, tzinfo=kst), days=tuple(range(7)), chat_id=cfg.get_chat_id(), data=app_data)
-        jq.run_daily(scheduled_auto_sync_winter, time=datetime.time(9, 30, tzinfo=kst), days=tuple(range(7)), chat_id=cfg.get_chat_id(), data=app_data)
-        
-        jq.run_daily(scheduled_force_reset, time=datetime.time(TARGET_HOUR, 0, tzinfo=kst), days=(0,1,2,3,4), chat_id=cfg.get_chat_id(), data=app_data)
-        jq.run_repeating(scheduled_premarket_monitor, interval=60, chat_id=cfg.get_chat_id(), data=app_data)
-        jq.run_daily(scheduled_regular_trade, time=datetime.time(TARGET_HOUR, 30, tzinfo=kst), days=(0,1,2,3,4), chat_id=cfg.get_chat_id(), data=app_data)
-        
-        jq.run_repeating(scheduled_sniper_monitor, interval=60, chat_id=cfg.get_chat_id(), data=app_data)
-        
-    app.run_polling()
-
-if __name__ == "__main__":
-    main()
+        ledger_records.reverse()
+        return ledger_records, final_qty, final_avg
