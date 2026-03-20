@@ -140,14 +140,21 @@ class TelegramController:
             prev_close = await asyncio.to_thread(self.broker.get_previous_close, t)
             ma_5day = await asyncio.to_thread(self.broker.get_5day_ma, t)
             
-            # 🦇 [V18.11 패치] 17:00 스케줄러 누락 시 BB 하한선 실시간 보완 캐싱
+            # 🦇 [V19.1 패치] 지시서용 하이브리드 타점 사전 연산
             bb_lower = self.cfg.get_daily_bb_lower(t)
             if bb_lower == 0.0 and self.cfg.get_version(t) == "V17":
                 bb_lower = await asyncio.to_thread(self.broker.get_bb_lower, t)
                 self.cfg.set_daily_bb_lower(t, bb_lower)
+                
+            actual_avg = float(h['avg'])
+            # 0.91을 곱해서 -9% 바닥 타점을 구함
+            hybrid_base = min(actual_avg, prev_close) * 0.91 if actual_avg > 0 and prev_close > 0 else prev_close * 0.91
+            # 블밴 하한가와 -9% 타점 중 더 높은 가격을 스나이퍼 예상 덫으로 설정
+            hybrid_target = max(bb_lower, hybrid_base)
+            trigger_reason = "BB" if bb_lower >= hybrid_base else "-9%"
             
             plan = self.strategy.get_plan(
-                t, curr, float(h['avg']), int(h['qty']), prev_close, ma_5day=ma_5day,
+                t, curr, actual_avg, int(h['qty']), prev_close, ma_5day=ma_5day,
                 market_type="REG", available_cash=allocated_cash[t], force_turbo_off=force_turbo_off
             )
             split = self.cfg.get_split_count(t)
@@ -155,16 +162,19 @@ class TelegramController:
             ver = self.cfg.get_version(t)
             
             ticker_data_list.append({
-                'ticker': t, 'version': ver, 't_val': plan.get('t_val', 0.0), 'split': split, 'curr': curr, 'avg': float(h['avg']), 'qty': int(h['qty']),
-                'profit_amt': (curr - float(h['avg'])) * int(h['qty']) if int(h['qty']) > 0 else 0, 
-                'profit_pct': (curr - float(h['avg'])) / float(h['avg']) * 100 if float(h['avg']) > 0 else 0,
+                'ticker': t, 'version': ver, 't_val': plan.get('t_val', 0.0), 'split': split, 'curr': curr, 'avg': actual_avg, 'qty': int(h['qty']),
+                'profit_amt': (curr - actual_avg) * int(h['qty']) if int(h['qty']) > 0 else 0, 
+                'profit_pct': (curr - actual_avg) / actual_avg * 100 if actual_avg > 0 else 0,
                 'turbo_txt': "ON" if self.cfg.get_turbo_mode() else "OFF",
                 'target': self.cfg.get_target_profit(t), 'star_pct': round(plan.get('star_ratio', 0) * 100, 2) if 'star_ratio' in plan else 0.0,
                 'seed': seed, 'one_portion': plan.get('one_portion', 0.0), 'plan': plan,
                 'is_locked': self.cfg.check_lock(t, "REG") or self.cfg.check_lock(t, "SNIPER"), 'mode': "REG",
                 'is_reverse': plan.get('is_reverse', False), 'star_price': plan.get('star_price', 0.0),
                 'escrow': self.cfg.get_escrow_cash(t),
-                'bb_lower': bb_lower
+                'bb_lower': bb_lower,
+                'hybrid_base': hybrid_base,        # 추가됨: 순수 -9% 가격
+                'hybrid_target': hybrid_target,    # 추가됨: 최종 하이브리드 타격가
+                'trigger_reason': trigger_reason   # 추가됨: 어떤 조건이 더 높은지
             })
             total_buy_needed += sum(o['price']*o['qty'] for o in plan['orders'] if o['side']=='BUY')
 
@@ -229,7 +239,7 @@ class TelegramController:
                         if curr_ret >= exit_target:
                             self.cfg.set_reverse_state(ticker, False, 0, 0.0)
                             self.cfg.clear_escrow_cash(ticker)
-                            await context.bot.send_message(chat_id, f"🌤️ <b>[{ticker}] 리버스 목표 달성({curr_ret:.2f}%)!</b>\n격리 병동을 공식 졸업하고 가상 장부(Escrow)를 해제합니다.", parse_mode='HTML')
+                            await context.bot.send_message(chat_id, f"🌤️ <b>[{ticker}] 리버스 목표 달성({curr_ret:.2f}%)!</b>\n격리 병동을 공식 졸업하고 가상 장부(Escrow) 해제합니다.", parse_mode='HTML')
                 
                 recs = [r for r in self.cfg.get_ledger() if r['ticker'] == ticker]
                 ledger_qty, avg_price, _, _ = self.cfg.calculate_holdings(ticker, recs)

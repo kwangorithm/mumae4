@@ -83,6 +83,7 @@ async def scheduled_force_reset(context):
     for t in app_data['cfg'].get_active_tickers():
         app_data['cfg'].increment_reverse_day(t)
         
+        # 표시용으로 1회 저장 (실제 스나이퍼 타격은 실시간 연산값을 사용)
         bb_lower = await asyncio.to_thread(app_data['broker'].get_bb_lower, t)
         app_data['cfg'].set_daily_bb_lower(t, bb_lower)
         
@@ -165,10 +166,21 @@ async def scheduled_sniper_monitor(context):
             prev_c = await asyncio.to_thread(broker.get_previous_close, t)
             if curr_p <= 0: continue
             
-            bb_lower = cfg.get_daily_bb_lower(t) 
+            # 🦇 [V19.1 패치] 하이브리드(MAX) 다이내믹 밴드 트리거 연산
+            real_time_bb_lower = await asyncio.to_thread(broker.get_bb_lower, t, current_price=curr_p)
             
-            if bb_lower > 0 and curr_p <= bb_lower and curr_p < avg_price:
-                # 🦇 [V18.12 패치] 예산 고갈 시 스나이퍼 무한 루프(스팸) 방지
+            # 대표님의 궁극의 공식 적용: min(평단가, 전일종가) * 0.91 (-9% 타점)
+            hybrid_base = min(avg_price, prev_c) * 0.91
+            
+            # 두 값을 맞붙여서 더 높은 가격(현실성 있는 바닥)을 최종 타격가로 확정
+            raw_target_price = max(real_time_bb_lower, hybrid_base)
+            target_buy_price = math.floor(raw_target_price * 100) / 100.0
+            
+            trigger_reason = "실시간 블밴 하한가" if real_time_bb_lower >= hybrid_base else "-9% 고정 하한가"
+            
+            # 최종 확정된 타격가(target_buy_price)를 기준으로 스나이퍼 발동!
+            if target_buy_price > 0 and curr_p <= target_buy_price and curr_p < avg_price:
+                
                 is_rev = cfg.get_reverse_state(t).get("is_active", False)
                 if is_rev:
                     sniper_budget = cfg.get_escrow_cash(t) / 4.0
@@ -177,7 +189,7 @@ async def scheduled_sniper_monitor(context):
                     sniper_budget = cfg.get_seed(t) / split if split > 0 else 0
                 
                 if sniper_budget < curr_p:
-                    continue # 예산이 1주 가격보다 적으면 스나이퍼 타격 생략 (API 및 텔레그램 스팸 원천 차단)
+                    continue # 예산 고갈 시 텔레그램 스팸 원천 차단
 
                 await asyncio.to_thread(broker.cancel_all_orders_safe, t, side="BUY")
                 await asyncio.sleep(1.0)
@@ -185,12 +197,11 @@ async def scheduled_sniper_monitor(context):
                 hunt_success = False
                 
                 for attempt in range(3):
-                    ask_price = await asyncio.to_thread(broker.get_ask_price, t)
-                    
-                    if ask_price > 0 and ask_price <= bb_lower:
-                        buy_qty = math.floor(sniper_budget / ask_price)
+                    if target_buy_price > 0:
+                        buy_qty = math.floor(sniper_budget / target_buy_price)
                         if buy_qty > 0:
-                            res = broker.send_order(t, "BUY", buy_qty, ask_price, "LIMIT")
+                            # 덫을 놓는 가격은 하이브리드 연산으로 결정된 최적의 바닥 가격
+                            res = broker.send_order(t, "BUY", buy_qty, target_buy_price, "LIMIT")
                             if res.get('rt_cd') == '0':
                                 await asyncio.sleep(5.0)
                                 unfilled = await asyncio.to_thread(broker.get_unfilled_orders_detail, t)
@@ -198,9 +209,9 @@ async def scheduled_sniper_monitor(context):
                                 
                                 if not buy_unfilled:
                                     cfg.set_lock(t, "SNIPER") 
-                                    msg = f"💥 <b>[{t}] 스나이퍼 하단 기습 명중! (볼린저 밴드 이탈)</b>\n"
-                                    msg += f"📉 실시간 매도 1호가(${ask_price:.2f})가 볼린저 하한선(${bb_lower:.2f}) 이하로 파악되었습니다.\n"
-                                    msg += f"🦇 <b>{buy_qty}주를 지정가(LIMIT) 매수하여 전량 체결</b>되었습니다!\n"
+                                    msg = f"💥 <b>[{t}] V19.1 하이브리드 덫 명중! ({trigger_reason} 이탈)</b>\n"
+                                    msg += f"📉 실시간 현재가(${curr_p:.2f})가 <b>[{trigger_reason}]</b> 기준선(${target_buy_price:.2f})마저 뚫었습니다!\n"
+                                    msg += f"🎯 <b>최적의 바닥 가격(${target_buy_price:.2f})에 {buy_qty}주 지정가 덫이 완벽하게 체결</b>되었습니다!\n"
                                     msg += "🔫 당일 스나이퍼 활동을 짜릿하게 종료합니다."
                                     await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode='HTML')
                                     hunt_success = True
@@ -214,13 +225,13 @@ async def scheduled_sniper_monitor(context):
                 if hunt_success:
                     continue
 
-                # 🦇 [V18.12 패치] 스팸 방지 쿨타임 (1시간)
+                # 🦇 [V19.0 패치] 스팸 방지 1시간(3600초) 쿨타임
                 now_ts = time.time()
                 fail_history = app_data.setdefault('sniper_fail_ts', {})
                 if now_ts - fail_history.get(t, 0) > 3600:
-                    msg = f"🛡️ <b>[{t}] 스나이퍼 하단 기습 실패 (방어선 복구)</b>\n"
-                    msg += f"📉 3회에 걸쳐 하한선 타격을 시도했으나 전량 체결되지 않았습니다.\n"
-                    msg += f"🦇 취소했던 원래의 방어 매수(LOC) 주문을 다시 호가창에 장전합니다."
+                    msg = f"🛡️ <b>[{t}] V19.1 하이브리드 덫 기습 실패 (1시간 쿨타임 진입)</b>\n"
+                    msg += f"📉 하이브리드 타격선(${target_buy_price:.2f})에 3회 덫을 놓았으나 전량 체결되지 않았습니다.\n"
+                    msg += f"🦇 스나이퍼는 1시간 동안 숨을 죽이며, 일반 방어 매수(LOC) 주문을 호가창에 원상 복구합니다."
                     await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode='HTML')
                     fail_history[t] = now_ts
                 

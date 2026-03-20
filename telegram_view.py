@@ -188,13 +188,14 @@ class TelegramView:
             else:
                 body_msg += f"⚙️ 🎯 {t_info['target']}% | ⭐ {t_info['star_pct']}% | 🏎️가속 {t_info['turbo_txt']}\n"
                 
-            # 🦇 [V18.11 패치] 볼린저 밴드 하한선 상시 노출 및 0.0일 때 예외 처리
-            bb_lower = t_info.get('bb_lower', 0.0)
+            # 🦇 [V19.1 패치] 하이브리드 동적 하한선(Dynamic Floor) 시각화 UI 제안 C(초정밀 축약형) 적용
             if v_mode == "V17":
-                if bb_lower > 0:
-                    body_msg += f"📉 <b>하단 스나이퍼 대기선 (BB): ${bb_lower:.2f}</b>\n"
+                hybrid_target = t_info.get('hybrid_target', 0.0)
+                if hybrid_target > 0:
+                    trigger_reason = "BB" if t_info.get('trigger_reason') == "BB" else "-9%"
+                    body_msg += f"📉 <b>스나이퍼({trigger_reason}): ${hybrid_target:.2f} 이하 대기중</b>\n"
                 else:
-                    body_msg += f"📉 <b>하단 스나이퍼 대기선 (BB): 장전 대기 중</b>\n"
+                    body_msg += f"📉 <b>스나이퍼: 장전 대기 중</b>\n"
             
             body_msg += f"📋 <b>[주문 계획 - {proc_status}]</b>\n"
             

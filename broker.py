@@ -9,6 +9,7 @@ import datetime
 import os
 import math
 import yfinance as yf
+import pytz
 
 class KoreaInvestmentBroker:
     def __init__(self, app_key, app_secret, cano, acnt_prdt_cd="01"):
@@ -19,6 +20,7 @@ class KoreaInvestmentBroker:
         self.base_url = "https://openapi.koreainvestment.com:9443"
         self.token_file = f"data/token_{cano}.dat" 
         self.token = None
+        self._bb_19d_cache = {}  # 🦇 [V18.13] API 과부하 방지용 19일치 종가 전용 캐시 메모리
         self._get_access_token()
 
     def _get_access_token(self, force=False):
@@ -230,36 +232,65 @@ class KoreaInvestmentBroker:
             
         return 0.0
 
-    def get_bb_lower(self, ticker):
-        try:
-            stock = yf.Ticker(ticker)
-            hist = stock.history(period="20d") 
-            if len(hist) >= 20: 
-                ma20 = float(hist['Close'].mean())
-                std20 = float(hist['Close'].std())
-                return float(ma20 - (std20 * 2))
-        except Exception as e:
-            print(f"⚠️ [야후 파이낸스] BB 하한선 에러, 한투 API 우회 가동: {e}")
-            
-        try:
-            excg_cd = "AMS" if ticker == "SOXL" else "NAS"
-            params = {
-                "AUTH": "", "EXCD": excg_cd, "SYMB": ticker,
-                "GUBN": "0", "BYMD": "", "MODP": "1"
-            }
-            res = self._call_api("HHDFS76240000", "/uapi/overseas-price/v1/quotations/dailyprice", "GET", params=params)
-            if res.get('rt_cd') == '0':
-                output2 = res.get('output2', [])
-                if isinstance(output2, list) and len(output2) >= 20:
-                    closes = [float(x['clos']) for x in output2[:20]]
-                    ma20 = sum(closes) / 20.0
-                    variance = sum([((x - ma20) ** 2) for x in closes]) / 19.0
-                    std20 = math.sqrt(variance)
-                    return float(ma20 - (std20 * 2))
-        except Exception as e:
-            print(f"❌ [한투 API] BB 하한선 우회 조회 실패: {e}")
-            
-        return 0.0
+    # 🦇 [V18.13] 다이내믹 트랩 핵심: 19일 캐싱 + 실시간 현재가 결합 재계산 엔진
+    def get_bb_lower(self, ticker, current_price=None):
+        est = pytz.timezone('US/Eastern')
+        today_str = datetime.datetime.now(est).strftime('%Y-%m-%d')
+        today_kis = datetime.datetime.now(est).strftime('%Y%m%d')
+        
+        closes_19d = []
+        
+        # 1. 19일치 과거 데이터 뇌(캐시)에서 탐색
+        if ticker in self._bb_19d_cache and self._bb_19d_cache[ticker]['date'] == today_str:
+            closes_19d = self._bb_19d_cache[ticker]['closes']
+        else:
+            # 캐시가 없으면 딱 1번만 야후(또는 한투) API를 찔러서 어제까지의 19개 데이터를 구함
+            try:
+                stock = yf.Ticker(ticker)
+                hist = stock.history(period="30d") 
+                if not hist.empty:
+                    if hist.index.tz is None: hist.index = hist.index.tz_localize('UTC')
+                    hist_est = hist.index.tz_convert('US/Eastern')
+                    # 오늘 날짜를 제외한 과거 확정 데이터만 추출
+                    past_hist = hist[hist_est.strftime('%Y-%m-%d') < today_str]
+                    if len(past_hist) >= 19:
+                        closes_19d = past_hist['Close'].tolist()[-19:]
+                        self._bb_19d_cache[ticker] = {'date': today_str, 'closes': closes_19d}
+            except Exception as e:
+                print(f"⚠️ [야후 파이낸스] 19일치 과거 데이터 에러, 한투 API 우회 가동: {e}")
+                
+            if not closes_19d:
+                try:
+                    excg_cd = "AMS" if ticker == "SOXL" else "NAS"
+                    params = {"AUTH": "", "EXCD": excg_cd, "SYMB": ticker, "GUBN": "0", "BYMD": "", "MODP": "1"}
+                    res = self._call_api("HHDFS76240000", "/uapi/overseas-price/v1/quotations/dailyprice", "GET", params=params)
+                    if res.get('rt_cd') == '0':
+                        output2 = res.get('output2', [])
+                        # KIS API에서 오늘 날짜 제외하고 과거 19일 확보
+                        past_output = [x for x in output2 if x.get('stck_bsop_date', '99999999') < today_kis]
+                        if len(past_output) >= 19:
+                            closes_19d = [float(x['clos']) for x in past_output[:19]]
+                            closes_19d.reverse() # 최신순을 과거->최신순으로 뒤집기
+                            self._bb_19d_cache[ticker] = {'date': today_str, 'closes': closes_19d}
+                except Exception as e:
+                    print(f"❌ [한투 API] 19일치 과거 데이터 우회 조회 실패: {e}")
+
+        # 캐싱 실패 시 안전하게 0 반환
+        if len(closes_19d) < 19:
+            return 0.0
+
+        # 2. 19개 데이터 끝에 '실시간 현재가'를 슬쩍 끼워넣기 (20일치 세팅 완료)
+        target_closes = closes_19d.copy()
+        real_time_p = float(current_price) if current_price and current_price > 0 else self.get_current_price(ticker)
+        target_closes.append(real_time_p)
+        
+        # 3. 20일치 배열을 통째로 갈아서 즉석 평균, 표준편차 도출
+        ma20 = sum(target_closes) / 20.0
+        variance = sum([((x - ma20) ** 2) for x in target_closes]) / 19.0
+        std20 = math.sqrt(variance)
+        
+        real_time_bb_lower = float(ma20 - (std20 * 2))
+        return real_time_bb_lower
 
     def get_unfilled_orders(self, ticker):
         excg_cd = "AMEX" if ticker == "SOXL" else "NASD"
