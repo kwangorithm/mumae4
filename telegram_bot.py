@@ -151,7 +151,6 @@ class TelegramController:
             seed = self.cfg.get_seed(t)
             ver = self.cfg.get_version(t)
             
-            # 🦇 [V18.11 패치] 볼린저 밴드 하한선 값을 config에서 꺼내와서 뷰어에 전달할 데이터에 포함시킵니다.
             bb_lower = self.cfg.get_daily_bb_lower(t)
             
             ticker_data_list.append({
@@ -164,7 +163,7 @@ class TelegramController:
                 'is_locked': self.cfg.check_lock(t, "REG") or self.cfg.check_lock(t, "SNIPER"), 'mode': "REG",
                 'is_reverse': plan.get('is_reverse', False), 'star_price': plan.get('star_price', 0.0),
                 'escrow': self.cfg.get_escrow_cash(t),
-                'bb_lower': bb_lower # 👈 여기에 값을 추가했습니다!
+                'bb_lower': bb_lower
             })
             total_buy_needed += sum(o['price']*o['qty'] for o in plan['orders'] if o['side']=='BUY')
 
@@ -239,13 +238,6 @@ class TelegramController:
                 diff = actual_qty - ledger_qty
                 price_diff = abs(actual_avg - avg_price)
 
-                if actual_qty > 0 and len(recs) == 0:
-                    self.cfg.overwrite_ledger(ticker, actual_qty, actual_avg)
-                    await context.bot.send_message(chat_id, f"📸 <b>[{ticker} 스냅샷]</b> 장부 초기화 및 잔고 동기화 완료.", parse_mode='HTML')
-                    self._sync_escrow_cash(ticker) 
-                    if not silent_ledger: await self._display_ledger(ticker, chat_id, context)
-                    return "SUCCESS"
-
                 if actual_qty == 0:
                     if ledger_qty > 0:
                         kst = pytz.timezone('Asia/Seoul')
@@ -285,7 +277,9 @@ class TelegramController:
                 is_only_snapshot = (len(recs) == 1 and 'INIT' in str(recs[0].get('exec_id', '')))
                 ledger_target_trades = len([r for r in recs if r['date'] == target_ledger_str and 'INIT' not in str(r.get('exec_id', ''))])
                 
-                if is_only_snapshot and diff == 0 and price_diff < 0.01:
+                if diff == 0 and price_diff < 0.01:
+                    micro_mismatch = False
+                elif is_only_snapshot and diff == 0 and price_diff < 0.01:
                     micro_mismatch = False
                 else:
                     has_init_today = any('INIT' in str(r.get('exec_id', '')) for r in recs if r['date'] == target_ledger_str)

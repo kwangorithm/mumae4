@@ -338,6 +338,7 @@ class KoreaInvestmentBroker:
     def get_execution_history(self, ticker, start_date, end_date):
         excg_cd = "AMEX" if ticker == "SOXL" else "NASD"
         valid_execs = []
+        seen_keys = set()
         fk200 = ""
         nk200 = ""
         
@@ -358,7 +359,10 @@ class KoreaInvestmentBroker:
                 if isinstance(output, dict): output = [output] 
                 for item in output:
                     if float(item.get('ft_ccld_qty', '0')) > 0:
-                        valid_execs.append(item)
+                        unique_key = f"{item.get('odno')}_{item.get('ord_tmd')}_{item.get('ft_ccld_qty')}_{item.get('ft_ccld_unpr3')}"
+                        if unique_key not in seen_keys:
+                            seen_keys.add(unique_key)
+                            valid_execs.append(item)
                         
                 tr_cont = res.headers.get('tr_cont', '')
                 fk200 = resp_json.get('ctx_area_fk200', '').strip()
