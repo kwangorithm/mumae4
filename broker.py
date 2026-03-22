@@ -21,7 +21,7 @@ class KoreaInvestmentBroker:
         self.base_url = "https://openapi.koreainvestment.com:9443"
         self.token_file = f"data/token_{cano}.dat" 
         self.token = None
-        self._excg_cd_cache = {} # 🦇 [V19.10] 거래소 코드 캐싱용 메모리 추가
+        self._excg_cd_cache = {} 
         
         self._get_access_token()
 
@@ -50,13 +50,14 @@ class KoreaInvestmentBroker:
                 self.token = data['access_token']
                 expire_str = (datetime.datetime.now() + datetime.timedelta(seconds=int(data['expires_in']))).strftime('%Y-%m-%d %H:%M:%S')
                 
-                # 🦇 [V19.10] JSON 원자적 쓰기(Atomic Write) 적용: 토큰 파일 깨짐 방지
                 dir_name = os.path.dirname(self.token_file)
                 if dir_name and not os.path.exists(dir_name):
                     os.makedirs(dir_name, exist_ok=True)
                 fd, temp_path = tempfile.mkstemp(dir=dir_name, text=True)
                 with os.fdopen(fd, 'w', encoding='utf-8') as f:
                     json.dump({'token': self.token, 'expire': expire_str}, f)
+                    f.flush()
+                    os.fsync(fd)
                 os.replace(temp_path, self.token_file)
             else:
                 print(f"❌ [Broker] 토큰 발급 실패: {data.get('error_description', '알 수 없는 오류')}")
@@ -114,19 +115,16 @@ class KoreaInvestmentBroker:
         try: return float(str(value).replace(',', ''))
         except Exception: return 0.0
 
-    # 🦇 [V19.10 & V20.2] 거래소 코드 동적 획득 및 하드코딩 방어 개선
     def _get_exchange_code(self, ticker, target_api="PRICE"):
         if ticker in self._excg_cd_cache:
             codes = self._excg_cd_cache[ticker]
             return codes['PRICE'] if target_api == "PRICE" else codes['ORDER']
 
-        # 기본값 세팅 (캐싱 실패 시 최후 방어)
         price_cd = "NAS"
         order_cd = "NASD"
         dynamic_success = False
 
         try:
-            # 512: 나스닥, 513: 뉴욕, 529: 아멕스 (가장 흔한 나스닥부터 찔러봄)
             for prdt_type in ["512", "513", "529"]:
                 params = {
                     "PRDT_TYPE_CD": prdt_type,
@@ -151,7 +149,6 @@ class KoreaInvestmentBroker:
         except Exception as e:
             print(f"⚠️ [Broker] 거래소 코드 동적 획득 실패: {ticker} - {e}")
 
-        # 🎯 [V20.2 핫픽스] 동적 조회가 실패하여 여전히 기본값(NAS/NASD)인 경우에만 수동 하드코딩(최후의 보루) 적용
         if not dynamic_success:
             if ticker == "SOXL": price_cd, order_cd = "AMS", "AMEX"
             elif ticker == "TQQQ": price_cd, order_cd = "NAS", "NASD"
@@ -177,9 +174,8 @@ class KoreaInvestmentBroker:
             raw_bp = dncl_amt + sll_amt - buy_amt
             cash = math.floor((raw_bp * 0.9945) * 100) / 100.0              
 
-        # 🦇 [V19.10 핫픽스] KIS API 보유 종목 조회 시 하드코딩된 NASD를 동적 조회로 변경 (AMEX 종목 누락 방지)
         holdings = {}
-        target_excgs = ["NASD", "AMEX", "NYSE"] # 주요 거래소 순회 조회
+        target_excgs = ["NASD", "AMEX", "NYSE"] 
         
         for excg in target_excgs:
             params_hold = {"CANO": self.cano, "ACNT_PRDT_CD": self.acnt_prdt_cd, "OVRS_EXCG_CD": excg, "TR_CRCY_CD": "USD", "CTX_AREA_FK200": "", "CTX_AREA_NK200": ""}
@@ -189,7 +185,6 @@ class KoreaInvestmentBroker:
                 if cash <= 0:
                     o2 = res_hold.get('output2', {})
                     if isinstance(o2, list) and len(o2) > 0: o2 = o2[0]
-                    # 현금은 한 번만 업데이트
                     new_cash = self._safe_float(o2.get('ovrs_ord_psbl_amt', 0))
                     if new_cash > cash: cash = new_cash
                 
@@ -197,7 +192,7 @@ class KoreaInvestmentBroker:
                     ticker = item.get('ovrs_pdno')
                     qty = int(self._safe_float(item.get('ovrs_cblc_qty', 0)))
                     avg = self._safe_float(item.get('pchs_avg_pric', 0))
-                    if qty > 0 and ticker not in holdings: # 이미 조회된 종목은 덮어쓰지 않음
+                    if qty > 0 and ticker not in holdings: 
                         holdings[ticker] = {'qty': qty, 'avg': avg}
         
         return cash, holdings if holdings else None
@@ -291,8 +286,6 @@ class KoreaInvestmentBroker:
             print(f"❌ [한투 API] MA5 우회 조회 실패: {e}")
             
         return 0.0
-
-    # 🎯 [V20.2 핫픽스] BB 완전 폐기로 인한 무거운 get_bb_lower 함수 통째로 삭제 처리 완료
 
     def get_unfilled_orders(self, ticker):
         excg_cd = self._get_exchange_code(ticker, target_api="ORDER")
@@ -411,6 +404,14 @@ class KoreaInvestmentBroker:
                 break
         return valid_execs
 
+    # ==========================================================
+    # 🚨 [경고] 1줄 장부 덮어쓰기(CIRCUIT_BREAKER) 부활 절대 금지! 🚨
+    # ==========================================================
+    # 과거 V18.9에서 도입된 서킷 브레이커는 무결성 검증 실패 시 전체 매매 
+    # 역사를 날려버리고 단일 행(INIT)으로 덮어씌우는 파괴적 부작용이 있었습니다.
+    # 현재는 비파괴 보정(Calibration) 아키텍처로 진화하였으므로, 
+    # 어떠한 경우에도 전체 장부를 초기화하는 예외 처리를 이곳에 되살리지 마십시오!
+    # ==========================================================
     def get_genesis_ledger(self, ticker, limit_date_str=None):
         _, holdings = self.get_account_balance()
         if holdings is None: return None, 0, 0.0
@@ -432,8 +433,11 @@ class KoreaInvestmentBroker:
             loop_counter += 1
             date_str = target_date.strftime('%Y%m%d')
             
+            # 🦇 [V20.5 롤백 반영] 파괴적 서킷 브레이커(CIRCUIT_BREAKER) 제거
+            # 한계치에 도달하더라도 지금까지 역산한 기록만(혹은 빈 리스트) 정상 반환
+            # 이후 텔레그램 컨트롤러에서 '비파괴 보정(Calibration)' 행렬로 차이를 메꿈
             if limit_date_str and date_str < limit_date_str:
-                return "CIRCUIT_BREAKER", final_qty, final_avg
+                break 
                 
             execs = self.get_execution_history(ticker, date_str, date_str)
             

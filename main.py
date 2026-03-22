@@ -36,8 +36,8 @@ APP_SECRET = os.getenv("APP_SECRET")
 CANO = os.getenv("CANO")
 ACNT_PRDT_CD = os.getenv("ACNT_PRDT_CD", "01")
 
-if not all([APP_KEY, APP_SECRET, CANO]):
-    print("❌ [치명적 오류] .env 파일에 한투 API 필수 키(APP_KEY, APP_SECRET, CANO)가 누락되었습니다. 봇을 종료합니다.")
+if not all([TELEGRAM_TOKEN, APP_KEY, APP_SECRET, CANO]):
+    print("❌ [치명적 오류] .env 파일에 봇 구동 필수 키(TELEGRAM_TOKEN, APP_KEY, APP_SECRET, CANO)가 누락되었습니다. 봇을 종료합니다.")
     exit(1)
 
 log_filename = f"logs/bot_app_{datetime.datetime.now().strftime('%Y%m%d')}.log"
@@ -242,7 +242,6 @@ async def scheduled_sniper_monitor(context):
                         if buy_qty > 0:
                             res = broker.send_order(t, "BUY", buy_qty, target_buy_price, "LIMIT")
                             if res.get('rt_cd') == '0':
-                                # 🎯 [V20.2 핫픽스] 스나이퍼 락 점유 시간 대폭 단축 (5.0s -> 2.0s)
                                 await asyncio.sleep(2.0)
                                 unfilled = await asyncio.to_thread(broker.get_unfilled_orders_detail, t)
                                 buy_unfilled = [o for o in unfilled if o.get('sll_buy_dvsn_cd') == '02']
@@ -269,7 +268,6 @@ async def scheduled_sniper_monitor(context):
                                     await asyncio.to_thread(broker.cancel_all_orders_safe, t, side="BUY")
                                     await asyncio.sleep(1.0)
                     
-                    # 🎯 [V20.2 핫픽스] 재시도 대기 시간 단축 (1.5s -> 0.5s)
                     await asyncio.sleep(0.5)
                 
                 if hunt_success:
@@ -316,7 +314,6 @@ async def scheduled_sniper_monitor(context):
                     if bid_price > 0 and bid_price >= target_price:
                         res = broker.send_order(t, "SELL", qty, bid_price, "LIMIT")
                         if res.get('rt_cd') == '0':
-                            # 🎯 [V20.2 핫픽스] 락 점유 시간 단축 (5.0s -> 2.0s)
                             await asyncio.sleep(2.0)
                             unfilled = await asyncio.to_thread(broker.get_unfilled_orders_detail, t)
                             sell_unfilled = [o for o in unfilled if o.get('sll_buy_dvsn_cd') == '01']
@@ -342,7 +339,6 @@ async def scheduled_sniper_monitor(context):
                                 await asyncio.to_thread(broker.cancel_all_orders_safe, t, side="SELL")
                                 await asyncio.sleep(1.0)
                                 
-                    # 🎯 [V20.2 핫픽스] 재시도 대기 시간 단축 (1.5s -> 0.5s)
                     await asyncio.sleep(0.5)
                     
                 if hunt_success:
@@ -390,7 +386,6 @@ async def scheduled_sniper_monitor(context):
                         if bid_price > 0 and bid_price >= trigger_price:
                             res = broker.send_order(t, "SELL", q_qty, bid_price, "LIMIT")
                             if res.get('rt_cd') == '0':
-                                # 🎯 [V20.2 핫픽스] 락 점유 시간 단축 (5.0s -> 2.0s)
                                 await asyncio.sleep(2.0)
                                 unfilled_check = await asyncio.to_thread(broker.get_unfilled_orders_detail, t)
                                 sell_unfilled = [o for o in unfilled_check if o.get('sll_buy_dvsn_cd') == '01']
@@ -442,7 +437,6 @@ async def scheduled_sniper_monitor(context):
                                     await asyncio.to_thread(broker.cancel_all_orders_safe, t, side="SELL")
                                     await asyncio.sleep(1.0)
                                     
-                        # 🎯 [V20.2 핫픽스] 재시도 대기 시간 단축 (1.5s -> 0.5s)
                         await asyncio.sleep(0.5)
                         
                     if hunt_success:
@@ -457,9 +451,6 @@ async def scheduled_sniper_monitor(context):
                         await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode='HTML')
                         fail_history_q[t] = now_ts
                     
-                    # 🎯 [V20.2 핫픽스 - 가장 치명적인 버그] 
-                    # 중복 매수 버그 해결: 쿼터 익절 실패 시, 기존에 깔려있던 매수 주문을 
-                    # 싹 지우고 다시 플랜을 깔아야 예산이 2배로 안 들어갑니다.
                     await asyncio.to_thread(broker.cancel_all_orders_safe, t)
                     await asyncio.sleep(1.0)
                     
@@ -476,7 +467,7 @@ async def scheduled_regular_trade(context):
     now = datetime.datetime.now(kst)
     target_hour, _ = get_target_hour()
     
-    if now.hour != target_hour or now.minute != 30: return
+    if now.hour != target_hour: return
     if not is_market_open(): return
     
     chat_id = context.job.chat_id

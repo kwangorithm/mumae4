@@ -154,8 +154,17 @@ class TelegramController:
                 sniper_pct = self.cfg.get_sniper_trigger(t)
                 hybrid_target = safe_prev_close * (1 - (sniper_pct / 100.0))
                 
-                is_sniper_active = hybrid_target < actual_avg if actual_avg > 0 else True
-                trigger_reason = f"-{sniper_pct}%" if is_sniper_active else "🛑(불타기 금지 관망)"
+                if actual_avg > 0:
+                    is_sniper_active = (hybrid_target < actual_avg) and (hybrid_target < ma_5day)
+                    if hybrid_target >= actual_avg:
+                        trigger_reason = "🛑(평단 위 관망)"
+                    elif hybrid_target >= ma_5day:
+                        trigger_reason = "🛑(5일선 위 과열)"
+                    else:
+                        trigger_reason = f"-{sniper_pct}%"
+                else:
+                    is_sniper_active = True
+                    trigger_reason = f"-{sniper_pct}%"
                 
                 is_already_ordered = self.cfg.check_lock(t, "REG") or self.cfg.check_lock(t, "SNIPER")
                 
@@ -201,7 +210,6 @@ class TelegramController:
             res = await self.process_auto_sync(t, chat_id, context, silent_ledger=True)
             if res == "SUCCESS": success_tickers.append(t)
         
-        # 🎯 [V20.2 핫픽스] 락 문제를 해결하기 위해 별도의 트랜잭션으로 잔고를 가져와서 뷰어에 던져줌
         if success_tickers: 
             async with self.tx_lock:
                 _, holdings = self.broker.get_account_balance()
@@ -281,45 +289,34 @@ class TelegramController:
                     self._sync_escrow_cash(ticker) 
                     return "SUCCESS"
 
-                kst = pytz.timezone('Asia/Seoul')
-                now_kst = datetime.datetime.now(kst)
-
-                est = pytz.timezone('US/Eastern')
-                now_est = datetime.datetime.now(est)
-                nyse = mcal.get_calendar('NYSE')
-                
-                schedule = nyse.schedule(start_date=(now_est - datetime.timedelta(days=10)).date(), end_date=now_est.date())
-                
-                if not schedule.empty:
-                    last_trade_date = schedule.index[-1]
-                    target_kis_str = last_trade_date.strftime('%Y%m%d')
-                    target_ledger_str = last_trade_date.strftime('%Y-%m-%d')
-                else:
-                    target_kis_str = now_kst.strftime('%Y%m%d')
-                    target_ledger_str = now_kst.strftime('%Y-%m-%d')
-
-                target_execs = self.broker.get_execution_history(ticker, target_kis_str, target_kis_str)
-                kis_target_trades = len(target_execs)
-                ledger_target_trades = len([r for r in recs if r['date'] == target_ledger_str and 'INIT' not in str(r.get('exec_id', ''))])
-                
                 if diff == 0 and price_diff < 0.01:
-                    micro_mismatch = False
-                else:
-                    has_init_today = any('INIT' in str(r.get('exec_id', '')) for r in recs if r['date'] == target_ledger_str)
-                    if has_init_today: micro_mismatch = False
-                    else: micro_mismatch = (kis_target_trades != ledger_target_trades)
-
-                if diff == 0 and price_diff >= 0.01 and not micro_mismatch:
+                    pass 
+                elif diff == 0 and price_diff >= 0.01:
                     self.cfg.calibrate_avg_price(ticker, actual_avg)
-                    await context.bot.send_message(chat_id, f"🔧 <b>[{ticker}] 장부 평단가 미세 오차({price_diff:.4f}) 교정 완료!</b> (제네시스 생략)", parse_mode='HTML')
-                    self._sync_escrow_cash(ticker)
-                    return "SUCCESS"
+                    await context.bot.send_message(chat_id, f"🔧 <b>[{ticker}] 장부 평단가 미세 오차({price_diff:.4f}) 교정 완료!</b>", parse_mode='HTML')
+                elif diff != 0:
+                    kst = pytz.timezone('Asia/Seoul')
+                    now_kst = datetime.datetime.now(kst)
 
-                if diff != 0 or micro_mismatch:
+                    est = pytz.timezone('US/Eastern')
+                    now_est = datetime.datetime.now(est)
+                    nyse = mcal.get_calendar('NYSE')
+                    
+                    schedule = nyse.schedule(start_date=(now_est - datetime.timedelta(days=10)).date(), end_date=now_est.date())
+                    
+                    if not schedule.empty:
+                        last_trade_date = schedule.index[-1]
+                        target_kis_str = last_trade_date.strftime('%Y%m%d')
+                        target_ledger_str = last_trade_date.strftime('%Y-%m-%d')
+                    else:
+                        target_kis_str = now_kst.strftime('%Y%m%d')
+                        target_ledger_str = now_kst.strftime('%Y-%m-%d')
+
+                    target_execs = self.broker.get_execution_history(ticker, target_kis_str, target_kis_str)
+                    
                     temp_recs = [r for r in recs if r['date'] != target_ledger_str or 'INIT' in str(r.get('exec_id', ''))]
                     temp_qty, temp_avg, _, _ = self.cfg.calculate_holdings(ticker, temp_recs)
                     
-                    fast_track_success = False
                     temp_sim_qty = temp_qty
                     temp_sim_avg = temp_avg
                     new_target_records = []
@@ -342,33 +339,32 @@ class TelegramController:
                                 'qty': exec_qty, 'price': exec_price, 'avg_price': temp_sim_avg
                             })
                             
-                    if temp_sim_qty == actual_qty:
-                        fast_track_success = True
-                        if new_target_records:
-                            for r in new_target_records: r['avg_price'] = actual_avg
-                        elif temp_recs: temp_recs[-1]['avg_price'] = actual_avg
+                    gap_qty = actual_qty - temp_sim_qty
+                    if gap_qty != 0:
+                        calib_side = "BUY" if gap_qty > 0 else "SELL"
+                        new_target_records.append({
+                            'date': target_ledger_str, 
+                            'side': calib_side,
+                            'qty': abs(gap_qty), 
+                            'price': actual_avg, 
+                            'avg_price': actual_avg,
+                            'exec_id': f"CALIB_{int(time.time())}",
+                            'desc': "비파괴 보정"
+                        })
                         
-                    if fast_track_success: self.cfg.overwrite_incremental_ledger(ticker, temp_recs, new_target_records)
-                    else:
-                        reason = "당일 거래지문 불일치" if micro_mismatch else "수량/평단가 불일치"
-                        status_msg = await context.bot.send_message(chat_id, f"🔄 <b>[{ticker}] 증분 검증 실패({reason}). KIS 역산 엔진 가동 (Full Rebuild)...</b>", parse_mode='HTML')
+                    if new_target_records:
+                        for r in new_target_records: r['avg_price'] = actual_avg
+                    elif temp_recs: 
+                        temp_recs[-1]['avg_price'] = actual_avg
                         
-                        first_date_str = recs[0]['date'].replace('-', '') if recs else None
-                        gen_records, _, f_avg = self.broker.get_genesis_ledger(ticker, first_date_str)
-                        
-                        if gen_records == "CIRCUIT_BREAKER":
-                            self.cfg.overwrite_ledger(ticker, actual_qty, actual_avg)
-                            await status_msg.edit_text(f"🚨 <b>[{ticker}] 한투 주말 정산 등 외부 요인 감지!</b> 무리한 역산 대신 스냅샷 강제 갱신으로 안전하게 복구 완료.", parse_mode='HTML')
-                        elif gen_records is not None:
-                            self.cfg.overwrite_genesis_ledger(ticker, gen_records, f_avg)
-                            await status_msg.edit_text(f"✅ <b>[{ticker}] KIS 팩트 기반 실시간 장부 동기화 완료!</b>", parse_mode='HTML')
-                        else:
-                            await status_msg.edit_text(f"⚠️ [{ticker}] 역산 중 통신 오류가 발생했습니다.", parse_mode='HTML')
+                    self.cfg.overwrite_incremental_ledger(ticker, temp_recs, new_target_records)
+                    
+                    if gap_qty != 0:
+                        await context.bot.send_message(chat_id, f"🔧 <b>[{ticker}] 비파괴 장부 보정 완료!</b>\n▫️ 오차 수량({gap_qty}주)을 기존 역사 보존 상태로 안전하게 교정했습니다.", parse_mode='HTML')
 
                 self._sync_escrow_cash(ticker)
                 return "SUCCESS"
 
-    # 🎯 [V20.2 핫픽스] 락 외부에서 잔고를 받아오도록 pre_fetched_holdings 파라미터 추가
     async def _display_ledger(self, ticker, chat_id, context, query=None, message_obj=None, pre_fetched_holdings=None):
         recs = [r for r in self.cfg.get_ledger() if r['ticker'] == ticker]
         
@@ -407,7 +403,6 @@ class TelegramController:
                 
             report += "-"*30 + "</code>\n"
             
-            # 🎯 여기서 락 밖에서 안전하게 받아온 잔고(pre_fetched_holdings)를 사용
             actual_qty = int(pre_fetched_holdings.get(ticker, {'qty': 0})['qty']) if pre_fetched_holdings else 0
             actual_avg = float(pre_fetched_holdings.get(ticker, {'avg': 0})['avg']) if pre_fetched_holdings else 0.0
             
@@ -452,7 +447,7 @@ class TelegramController:
     async def cmd_reset(self, update, context):
         if not self._is_admin(update): return
         active_tickers = self.cfg.get_active_tickers()
-        msg, markup = self.view.get_reset_menu(active_tickers) # 🎯 동적 티커 전달
+        msg, markup = self.view.get_reset_menu(active_tickers)
         await update.message.reply_text(msg, reply_markup=markup, parse_mode='HTML')
 
     async def cmd_seed(self, update, context):
@@ -541,7 +536,7 @@ class TelegramController:
         elif action == "RESET":
             if sub == "MENU":
                 active_tickers = self.cfg.get_active_tickers()
-                msg, markup = self.view.get_reset_menu(active_tickers) # 🎯 동적 티커 전달
+                msg, markup = self.view.get_reset_menu(active_tickers)
                 await query.edit_message_text(msg, reply_markup=markup, parse_mode='HTML')
             elif sub == "LOCK": 
                 ticker = data[2]
@@ -593,7 +588,7 @@ class TelegramController:
             await query.edit_message_text(f"🚀 {t} 수동 강제 전송 시작 (교차 분리)...")
             async with self.tx_lock:
                 cash, holdings = self.broker.get_account_balance()
-                if holdings is None: return await query.edit_message_text("❌ API 통신 오류로 주문을 실행할 수 없습니다.")
+                if holdings is None: return await query.edit_message_text("❌ API 통신 오류로 주문을 실행할 수문을 실행할 수 없습니다.")
                     
                 _, allocated_cash, force_turbo_off = self._calculate_budget_allocation(cash, self.cfg.get_active_tickers())
                 h = holdings.get(t, {'qty':0, 'avg':0})
@@ -721,15 +716,16 @@ class TelegramController:
                 await update.message.reply_text(f"✅ [{ticker}] 수동 액면 보정 완료\n▫️ 모든 장부 기록이 {val}배 비율로 정밀하게 소급 조정되었습니다.")
                 
             elif state.startswith("CONF_SNIPER"):
-                # 🎯 [V20.2 핫픽스] 스나이퍼 타점 0% 입력 방어막 (0보다 커야 함)
                 if val <= 0: return await update.message.reply_text("❌ 오류: 스나이퍼 타점은 0보다 커야 합니다. (물타기 금지 원칙)")
                 ticker = parts[2]
                 self.cfg.set_sniper_trigger(ticker, val)
                 await update.message.reply_text(f"✅ [{ticker}] 스나이퍼 타점이 -{val}% 로 변경되었습니다.")
                 
-            del self.user_states[chat_id]
-            
         except ValueError:
-            await update.message.reply_text("❌ 오류: 유효한 숫자를 입력하세요.")
+            await update.message.reply_text("❌ 오류: 유효한 숫자를 입력하세요. (입력 대기 상태가 강제 해제되었습니다.)")
         except Exception as e:
             await update.message.reply_text(f"❌ 알 수 없는 오류 발생: {str(e)}")
+        finally:
+            if chat_id in self.user_states:
+                del self.user_states[chat_id]
+

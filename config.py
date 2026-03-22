@@ -63,7 +63,6 @@ class ConfigManager:
                 return default if default is not None else {}
         return default if default is not None else {}
 
-    # 🦇 [V19.10 핫픽스] JSON 원자적 쓰기(Atomic Write)에 fsync 추가: 정전 시 빈 파일 방지 완벽 대응
     def _save_json(self, filename, data):
         try:
             dir_name = os.path.dirname(filename)
@@ -73,8 +72,8 @@ class ConfigManager:
             fd, temp_path = tempfile.mkstemp(dir=dir_name, text=True)
             with os.fdopen(fd, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
-                f.flush()         # 버퍼에 있는 데이터를 OS로 밀어냄
-                os.fsync(fd)      # OS가 하드디스크에 물리적으로 기록할 때까지 대기
+                f.flush()         
+                os.fsync(fd)      
                 
             os.replace(temp_path, filename)
         except Exception as e:
@@ -94,7 +93,6 @@ class ConfigManager:
                 print(f"⚠️ [Config] 파일 로드 에러 ({filename}): {e}")
         return default
 
-    # 🦇 [V19.10 핫픽스] 일반 텍스트 파일 저장에도 fsync 적용 (원자적 쓰기 완성)
     def _save_file(self, filename, content):
         try:
             dir_name = os.path.dirname(filename)
@@ -163,7 +161,7 @@ class ConfigManager:
         changed = False
         for r in ledger:
             if r.get('ticker') == ticker:
-                new_qty = int(r['qty'] * ratio)
+                new_qty = round(r['qty'] * ratio)
                 r['qty'] = new_qty if new_qty > 0 else (1 if r['qty'] > 0 else 0)
                 r['price'] = round(r['price'] / ratio, 4)
                 if 'avg_price' in r:
@@ -200,7 +198,7 @@ class ConfigManager:
         
         for i, rec in enumerate(new_today_records):
             max_id += 1
-            updated_ticker_recs.append({
+            new_row = {
                 "id": max_id,
                 "date": rec['date'],
                 "ticker": ticker,
@@ -208,9 +206,13 @@ class ConfigManager:
                 "price": rec['price'],
                 "qty": rec['qty'],
                 "avg_price": rec['avg_price'],
-                "exec_id": f"FASTTRACK_{int(time.time())}_{i}",
+                "exec_id": rec.get("exec_id", f"FASTTRACK_{int(time.time())}_{i}"),
                 "is_reverse": current_rev_state
-            })
+            }
+            if "desc" in rec:
+                new_row["desc"] = rec["desc"]
+                
+            updated_ticker_recs.append(new_row)
             
         remaining.extend(updated_ticker_recs)
         self._save_json(self.FILES["LEDGER"], remaining)
@@ -259,7 +261,6 @@ class ConfigManager:
                 total_qty -= r['qty']
                 total_sold += (r['price'] * r['qty'])
         
-        # 🦇 [V19.10 핫픽스] 비정상 장부 방어: 수량이 0이거나 음수로 꼬였을 때 평단가를 무조건 0으로 교정
         total_qty = max(0, int(total_qty))
         invested_up = math.ceil(total_invested * 100) / 100.0
         sold_up = math.ceil(total_sold * 100) / 100.0
@@ -355,7 +356,8 @@ class ConfigManager:
         t_val = (holdings * avg_price) / base_portion if base_portion > 0 else 0.0
             
         if holdings > 0:
-            current_budget = rem_cash / (split - t_val) if (split - t_val) > 0 else rem_cash
+            safe_denom = max(1.0, split - t_val)
+            current_budget = rem_cash / safe_denom
         else:
             current_budget = base_portion
             t_val = 0.0
@@ -533,3 +535,4 @@ class ConfigManager:
 
     def set_chat_id(self, v):
         self._save_file(self.FILES["CHAT_ID"], v)
+
