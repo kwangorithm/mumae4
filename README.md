@@ -57,7 +57,7 @@ python main.py
 📁 strategy.py: 예산 분배 및 특정 조건에 따른 매수/매도 알고리즘이 구현된 클래스.  
 📁 telegram_bot.py / telegram_view.py: 텔레그램 봇 라우터 및 화면(UI) 렌더링을 담당하는 클래스.  
 📁 config.py: 각종 JSON 데이터를 저장하고 불러오는 로컬 캐싱/설정 매니저.  
-📁 version_history.py: 코드 업데이트 최신(20) 히스토리 기록  
-📁 version_archive.py: 코드 업데이트 과거버전(14~19) 히스토리 기록
+📁 version_history.py: 코드 업데이트 최신 히스토리 기록  
+📁 version_archive.py(삭제) 히스토리 파일 통합
 
 ```bash
