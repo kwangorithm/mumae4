@@ -11,6 +11,8 @@ import math
 import yfinance as yf
 import pytz
 import tempfile
+import pandas as pd   # 🔥 V20 추가: 동적 타점 계산용
+import numpy as np    # 🔥 V20 추가: 동적 타점 계산용
 
 class KoreaInvestmentBroker:
     def __init__(self, app_key, app_secret, cano, acnt_prdt_cd="01"):
@@ -404,14 +406,6 @@ class KoreaInvestmentBroker:
                 break
         return valid_execs
 
-    # ==========================================================
-    # 🚨 [경고] 1줄 장부 덮어쓰기(CIRCUIT_BREAKER) 부활 절대 금지! 🚨
-    # ==========================================================
-    # 과거 V18.9에서 도입된 서킷 브레이커는 무결성 검증 실패 시 전체 매매 
-    # 역사를 날려버리고 단일 행(INIT)으로 덮어씌우는 파괴적 부작용이 있었습니다.
-    # 현재는 비파괴 보정(Calibration) 아키텍처로 진화하였으므로, 
-    # 어떠한 경우에도 전체 장부를 초기화하는 예외 처리를 이곳에 되살리지 마십시오!
-    # ==========================================================
     def get_genesis_ledger(self, ticker, limit_date_str=None):
         _, holdings = self.get_account_balance()
         if holdings is None: return None, 0, 0.0
@@ -433,9 +427,6 @@ class KoreaInvestmentBroker:
             loop_counter += 1
             date_str = target_date.strftime('%Y%m%d')
             
-            # 🦇 [V20.5 롤백 반영] 파괴적 서킷 브레이커(CIRCUIT_BREAKER) 제거
-            # 한계치에 도달하더라도 지금까지 역산한 기록만(혹은 빈 리스트) 정상 반환
-            # 이후 텔레그램 컨트롤러에서 '비파괴 보정(Calibration)' 행렬로 차이를 메꿈
             if limit_date_str and date_str < limit_date_str:
                 break 
                 
@@ -496,3 +487,78 @@ class KoreaInvestmentBroker:
         except Exception as e:
             print(f"⚠️ [야후 파이낸스] 액면분할 조회 에러: {e}")
         return 0.0, ""
+
+    # ==========================================================
+    # 🔥 V20 핵심 심장: 프리마켓 통합 동적 하이브리드 타점 계산 엔진
+    # ==========================================================
+    def get_dynamic_sniper_target(self, index_ticker, weight=1.0):
+        try:
+            # 1. 1개월치 5분봉 다운로드 (프리/애프터마켓 포함)
+            df = yf.download(index_ticker, period='1mo', interval='5m', prepost=True, progress=False)
+            if df.empty: 
+                return None
+            
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.droplevel(1)
+                
+            df.index = df.index.tz_convert('America/New_York')
+            
+            # 2. 노이즈 제거: 04:00(프리장) ~ 16:00(정규장 마감)까지만 필터링
+            df = df.between_time('04:00', '16:00')
+            
+            # 3. 프리마켓 포함 일봉으로 재조립
+            daily_data = []
+            for date, group in df.groupby(df.index.date):
+                if group.empty: continue
+                daily_data.append({
+                    'Date': pd.to_datetime(date),
+                    'High': group['High'].max(),
+                    'Low': group['Low'].min(),
+                    'Close': group['Close'].iloc[-1]
+                })
+            daily_df = pd.DataFrame(daily_data).set_index('Date')
+            
+            # 4. 🚨 [매우 중요] 시간대 보호 기제 (실시간 ATR 오염 방지)
+            est = pytz.timezone('America/New_York')
+            now_est = datetime.datetime.now(est)
+            today_date = now_est.date()
+            
+            # 만약 장중(16:00 이전)에 이 코드가 돈다면, '오늘'의 불완전한 데이터는 날려버리고
+            # 완벽히 마감된 '어제(T-1)'까지의 일봉만 사용합니다.
+            if now_est.hour < 16:
+                daily_df = daily_df[daily_df.index.date < today_date]
+            else:
+                daily_df = daily_df[daily_df.index.date <= today_date]
+                
+            if len(daily_df) < 15: 
+                return None # 14일치 데이터가 안 모였으면 계산 포기
+                
+            # 5. TR 및 ATR(5, 14) 계산
+            prev_c = daily_df['Close'].shift(1)
+            tr = pd.concat([
+                daily_df['High'] - daily_df['Low'],
+                abs(daily_df['High'] - prev_c),
+                abs(daily_df['Low'] - prev_c)
+            ], axis=1).max(axis=1)
+            
+            atr_5d = tr.rolling(window=5).mean()
+            atr_14d = tr.rolling(window=14).mean()
+            
+            # 6. 완벽하게 마감된 마지막 날(T-1)의 데이터 추출
+            last_atr_5 = atr_5d.iloc[-1]
+            last_atr_14 = atr_14d.iloc[-1]
+            last_close = daily_df['Close'].iloc[-1]
+            
+            # 7. 3배수 적용
+            exp_5d = (last_atr_5 / last_close) * 100 * 3
+            exp_14d = (last_atr_14 / last_close) * 100 * 3
+            
+            # 8. 하이브리드 조합 및 종목별 가중치(Multiplier) 적용
+            hybrid = max(exp_5d, exp_14d * 0.8)
+            final_target = hybrid * weight
+            
+            return round(final_target, 2)
+            
+        except Exception as e:
+            print(f"⚠️ [Broker] 동적 스나이퍼 타점 계산 실패 ({index_ticker}): {e}")
+            return None

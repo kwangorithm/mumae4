@@ -150,7 +150,6 @@ class TelegramView:
             t = t_info['ticker']
             v_mode = t_info['version']
             
-            # 🎯 [V20.3 핫픽스] 뷰어에서 직접 T값 1.1배 초과 여부를 감지하여 대형 경고문구 삽입!
             if t_info['t_val'] > (t_info['split'] * 1.1):
                 body_msg += f"⚠️ <b>[🚨 시스템 긴급 경고: 비정상 T값 폭주 감지!]</b>\n"
                 body_msg += f"🔎 현재 T값(<b>{t_info['t_val']:.4f}T</b>)이 설정된 분할수(<b>{int(t_info['split'])}분할</b>)를 초과했습니다!\n"
@@ -174,13 +173,16 @@ class TelegramView:
                 body_msg += f"⚠️ <b>[🚨 비상 상황: {t} 긴급 수혈 중]</b>\n"
                 body_msg += f"❗ <i>에스크로 금고가 바닥나 강제 매도를 통해 현금을 생성합니다.</i>\n\n"
             
+            # 🔥 V20.10 뷰어 업데이트: 모바일 가독성을 위해 제목을 완벽한 2줄 포맷으로 변경
             if is_rev:
                 bdg_txt = f"리버스 잔금쿼터 ${t_info['one_portion']:,.0f}"
                 icon = "🩸" if proc_status == "🩸리버스(긴급수혈)" else "🔄"
-                body_msg += f"{icon} <b>[{t}] {v_mode_display} 리버스 ({t_info['t_val']}T / {int(t_info['split'])}분)</b>\n"
+                body_msg += f"{icon} <b>[{t}] {v_mode_display} 리버스</b>\n"
+                body_msg += f"📈 진행: <b>{t_info['t_val']:.4f}T / {int(t_info['split'])}분할</b>\n"
             else:
                 bdg_txt = f"오늘 예산 ${t_info['one_portion']:,.0f}" if v_mode in ["V14", "V17"] else f"1회 ${t_info['one_portion']:,.0f}"
-                body_msg += f"{main_icon} <b>[{t}] ({v_mode_display} / {t_info['t_val']}T / {int(t_info['split'])}분할)</b>\n"
+                body_msg += f"{main_icon} <b>[{t}] {v_mode_display}</b>\n"
+                body_msg += f"📈 진행: <b>{t_info['t_val']:.4f}T / {int(t_info['split'])}분할</b>\n"
             
             body_msg += f"💵 총 시드: ${t_info['seed']:,.0f} ({bdg_txt})\n"
             
@@ -190,29 +192,29 @@ class TelegramView:
             elif is_rev and proc_status == "🩸리버스(긴급수혈)":
                 body_msg += f"🔐 <b>내 금고 보호액: $0.00 (Empty 🚨)</b>\n"
                 
-            body_msg += f"💰 현재 ${t_info['curr']:,.2f} / 평단 ${t_info['avg']:,.2f} <b>({t_info['qty']}주)</b>\n"
+            body_msg += f"💰 현재 ${t_info['curr']:,.2f} / 평단 ${t_info['avg']:,.2f} ({t_info['qty']}주)\n"
             
             sign = "+" if t_info['profit_amt'] >= 0 else "-"
             icon = "🔺" if t_info['profit_amt'] >= 0 else "🔻"
-            body_msg += f"{icon} <b>수익: {sign}{abs(t_info['profit_pct']):.2f}% ({sign}${abs(t_info['profit_amt']):,.2f})</b>\n"
+            body_msg += f"{icon} 수익: {sign}{abs(t_info['profit_pct']):.2f}% ({sign}${abs(t_info['profit_amt']):,.2f})\n"
             
             if is_rev:
-                body_msg += f"⚙️ 🌟 <b>5일선 별지점</b>: ${t_info['star_price']:.2f}\n"
+                body_msg += f"⚙️ 🌟 5일선 별지점: ${t_info['star_price']:.2f}\n"
             else:
                 body_msg += f"⚙️ 🎯 {t_info['target']}% | ⭐ {t_info['star_pct']}% | 🏎️가속 {t_info['turbo_txt']}\n"
-                
+            
+            hybrid_target = t_info.get('hybrid_target', 0.0)
+            sniper_pct = t_info.get('sniper_trigger', 9.0) 
+            trigger_reason = t_info.get('trigger_reason', '')
+            
             if v_mode == "V17":
-                hybrid_target = t_info.get('hybrid_target', 0.0)
-                sniper_pct = t_info.get('sniper_trigger', 9.0)
-                trigger_reason = t_info.get('trigger_reason', '')
-                
                 if trigger_reason.startswith("🛑"):
                     body_msg += f"📉 <b>{trigger_reason}</b>\n"
                 elif hybrid_target > 0:
-                    body_msg += f"📉 <b>스나이퍼({trigger_reason}): ${hybrid_target:.2f} 이하 대기중</b>\n"
+                    body_msg += f"📉 <b>스나이퍼({trigger_reason}): ${hybrid_target:.2f} 이하 대기</b>\n"
                 else:
                     body_msg += f"📉 <b>스나이퍼: 장전 대기 중</b>\n"
-            
+
             body_msg += f"📋 <b>[주문 계획 - {proc_status}]</b>\n"
             
             if t_info['plan']['orders']:
@@ -244,6 +246,11 @@ class TelegramView:
                     else: keyboard.append([InlineKeyboardButton(f"🚀 {t} 주문 실행", callback_data=f"EXEC:{t}")])
             else:
                 body_msg += f" 💤 주문 없음 (관망/예산소진)\n"
+            
+            if v_mode != "V17" and hybrid_target > 0 and not trigger_reason.startswith("🛑"):
+                body_msg += f"\n🎯 <b>스나이퍼 방어선(-{sniper_pct:.2f}%): ${hybrid_target:.2f}</b>\n"
+                body_msg += f"(💡 참고용으로 한투 사용자는 매수감시 모드에서 스나이퍼를 작동하실 수 있습니다.)\n"
+
             body_msg += "\n"
 
         final_msg = header_msg + body_msg

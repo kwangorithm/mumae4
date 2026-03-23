@@ -151,20 +151,27 @@ class TelegramController:
                 if status_code == "CLOSE" and curr > 0: safe_prev_close = curr
                 else: safe_prev_close = prev_close if prev_close else 0.0
                 
-                sniper_pct = self.cfg.get_sniper_trigger(t)
-                hybrid_target = safe_prev_close * (1 - (sniper_pct / 100.0))
+                idx_ticker = "SOXX" if t == "SOXL" else "QQQ"
+                weight = self.cfg.get_sniper_multiplier(t)
+                
+                dynamic_pct = await asyncio.to_thread(self.broker.get_dynamic_sniper_target, idx_ticker, weight)
+                
+                if dynamic_pct is None:
+                    dynamic_pct = 9.0 if t == "SOXL" else 5.0
+                
+                hybrid_target_price = safe_prev_close * (1 - (dynamic_pct / 100.0))
                 
                 if actual_avg > 0:
-                    is_sniper_active = (hybrid_target < actual_avg) and (hybrid_target < ma_5day)
-                    if hybrid_target >= actual_avg:
+                    is_sniper_active = (hybrid_target_price < actual_avg) and (hybrid_target_price < ma_5day)
+                    if hybrid_target_price >= actual_avg:
                         trigger_reason = "🛑(평단 위 관망)"
-                    elif hybrid_target >= ma_5day:
+                    elif hybrid_target_price >= ma_5day:
                         trigger_reason = "🛑(5일선 위 과열)"
                     else:
-                        trigger_reason = f"-{sniper_pct}%"
+                        trigger_reason = f"-{dynamic_pct}%"
                 else:
                     is_sniper_active = True
-                    trigger_reason = f"-{sniper_pct}%"
+                    trigger_reason = f"-{dynamic_pct}%"
                 
                 is_already_ordered = self.cfg.check_lock(t, "REG") or self.cfg.check_lock(t, "SNIPER")
                 
@@ -189,14 +196,15 @@ class TelegramController:
                     'escrow': self.cfg.get_escrow_cash(t),
                     'bb_lower': 0.0,  
                     'hybrid_base': 0.0, 
-                    'hybrid_target': hybrid_target,
+                    'hybrid_target': hybrid_target_price,
                     'trigger_reason': trigger_reason,
-                    'sniper_trigger': sniper_pct
+                    'sniper_trigger': dynamic_pct 
                 })
                 total_buy_needed += sum(o['price']*o['qty'] for o in plan['orders'] if o['side']=='BUY')
 
         surplus = cash - total_buy_needed
         rp_amount = surplus * 0.95 if surplus > 0 else 0
+        
         final_msg, markup = self.view.create_sync_report(status_text, dst_txt, cash, rp_amount, ticker_data_list, status_code in ["PRE", "REG"])
         await update.message.reply_text(final_msg, reply_markup=markup, parse_mode='HTML')
 
@@ -286,7 +294,7 @@ class TelegramController:
                             if changed:
                                 self.cfg._save_json(self.cfg.FILES["LEDGER"], ledger_data)
                                 
-                            await context.bot.send_message(chat_id, f"🌤️ <b>[{ticker}] 리버스 목표 달성({curr_ret:.2f}%)!</b>\n격리 병동을 공식 졸업하고 가상 장부(Escrow)를 해제합니다.", parse_mode='HTML')
+                            await context.bot.send_message(chat_id, f"🌤️ <b>[{ticker}] 리버스 목표 달성({curr_ret:.2f}%)!</b>\n격리 병동을 공식 졸업하고 가상 장부(Escrow) 해제합니다.", parse_mode='HTML')
                 
                 recs = [r for r in self.cfg.get_ledger() if r['ticker'] == ticker]
                 ledger_qty, avg_price, _, _ = self.cfg.calculate_holdings(ticker, recs)
@@ -505,9 +513,10 @@ class TelegramController:
                 
             msg += f"{icon} <b>{t} ({ver_display} 모드)</b>\n▫️ 분할: <b>{int(self.cfg.get_split_count(t))}회</b>\n▫️ 목표: <b>{self.cfg.get_target_profit(t)}%</b>\n▫️ 자동복리: <b>{self.cfg.get_compound_rate(t)}%</b>\n"
             
+            # 🔥 V20 버그 수정: V17 모드일 때 '가중치(Multiplier)' 정보를 출력하도록 변경
             if ver == "V17":
-                sniper_trigger = self.cfg.get_sniper_trigger(t)
-                msg += f"▫️ 스나이퍼 타점: <b>-{sniper_trigger}%</b>\n\n"
+                sniper_multiplier = self.cfg.get_sniper_multiplier(t)
+                msg += f"▫️ 스나이퍼 타점 가중치: <b>x {sniper_multiplier}</b>\n\n"
             else:
                 msg += "\n"
                 
@@ -522,8 +531,9 @@ class TelegramController:
                 InlineKeyboardButton(f"🔄 {t} 무매3/무매4 전환", callback_data=f"TOGGLE:VERSION:{t}"),
                 InlineKeyboardButton(f"✂️ {t} 액면보정", callback_data=f"INPUT:STOCK_SPLIT:{t}")
             ]
+            # 🔥 V20 버그 수정: 스나이퍼 입력 버튼 유지
             if ver == "V17":
-                row2.append(InlineKeyboardButton(f"📉 {t} 타점", callback_data=f"INPUT:SNIPER:{t}"))
+                row2.append(InlineKeyboardButton(f"📉 {t} 타점가중치", callback_data=f"INPUT:SNIPER:{t}"))
             keyboard.append(row2)
             
         await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
@@ -690,7 +700,8 @@ class TelegramController:
             elif sub == "TARGET": ko_name = "목표 수익률(%)"
             elif sub == "COMPOUND": ko_name = "자동 복리율(%)"
             elif sub == "STOCK_SPLIT": ko_name = "액면 분할/병합 비율 (예: 10분할은 10, 10병합은 0.1)"
-            elif sub == "SNIPER": ko_name = "스나이퍼 타점 퍼센트 (예: 9.0 또는 5.0)"
+            # 🔥 V20 버그 수정: 입력 안내 멘트 변경
+            elif sub == "SNIPER": ko_name = "스나이퍼 타점 가중치 (예: SOXL 기본 1.0, TQQQ 기본 0.9)"
             else: ko_name = "값"
             
             await context.bot.send_message(update.effective_chat.id, f"⚙️ [{ticker}] {ko_name} 입력 (숫자만):")
@@ -743,10 +754,11 @@ class TelegramController:
                 await update.message.reply_text(f"✅ [{ticker}] 수동 액면 보정 완료\n▫️ 모든 장부 기록이 {val}배 비율로 정밀하게 소급 조정되었습니다.")
                 
             elif state.startswith("CONF_SNIPER"):
-                if val <= 0: return await update.message.reply_text("❌ 오류: 스나이퍼 타점은 0보다 커야 합니다. (물타기 금지 원칙)")
+                # 🔥 V20 버그 수정: 입력값을 가중치(Multiplier)로 저장
+                if val <= 0: return await update.message.reply_text("❌ 오류: 가중치는 0보다 커야 합니다.")
                 ticker = parts[2]
-                self.cfg.set_sniper_trigger(ticker, val)
-                await update.message.reply_text(f"✅ [{ticker}] 스나이퍼 타점이 -{val}% 로 변경되었습니다.")
+                self.cfg.set_sniper_multiplier(ticker, val)
+                await update.message.reply_text(f"✅ [{ticker}] 스나이퍼 타점 가중치가 {val}배로 변경되었습니다.")
                 
         except ValueError:
             await update.message.reply_text("❌ 오류: 유효한 숫자를 입력하세요. (입력 대기 상태가 강제 해제되었습니다.)")
@@ -755,4 +767,3 @@ class TelegramController:
         finally:
             if chat_id in self.user_states:
                 del self.user_states[chat_id]
-

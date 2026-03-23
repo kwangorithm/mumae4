@@ -193,6 +193,13 @@ async def scheduled_sniper_monitor(context):
     cfg, broker, strategy, tx_lock = app_data['cfg'], app_data['broker'], app_data['strategy'], app_data['tx_lock']
     chat_id = context.job.chat_id
     
+    # 🔥 V20 추가: 트래픽 밴 방지용 일일 타점 캐싱
+    target_cache = app_data.setdefault('dynamic_targets', {})
+    today_est_str = now_est.strftime('%Y%m%d')
+    if target_cache.get('date') != today_est_str:
+        target_cache.clear()
+        target_cache['date'] = today_est_str
+    
     async with tx_lock:
         cash, holdings = broker.get_account_balance()
         if holdings is None: return
@@ -212,86 +219,105 @@ async def scheduled_sniper_monitor(context):
             prev_c = await asyncio.to_thread(broker.get_previous_close, t)
             if curr_p <= 0: continue
             
-            sniper_pct = cfg.get_sniper_trigger(t)
+            # 🔥 V20 추가: 동적 하이브리드 타점 캐싱 및 연산
+            idx_ticker = "SOXX" if t == "SOXL" else "QQQ"
+            if t not in target_cache:
+                weight = cfg.get_sniper_multiplier(t)
+                tgt = await asyncio.to_thread(broker.get_dynamic_sniper_target, idx_ticker, weight)
+                target_cache[t] = tgt if tgt is not None else (9.0 if t=="SOXL" else 5.0) # 계산 실패 시 안전장치
+
+            sniper_pct = target_cache[t]
             raw_target_price = prev_c * (1 - (sniper_pct / 100.0))
             target_buy_price = math.floor(raw_target_price * 100) / 100.0
             
             is_sniper_armed = target_buy_price < avg_price
-            trigger_reason = f"-{sniper_pct}% 절대방어선"
+            trigger_reason = f"-{sniper_pct}% 동적 방어선"
             
+            # ==========================================================
+            # 🔥 V20 핵심: 가로채기(Intercept) 매수 로직 (시크릿 모드 ON 한정)
+            # ==========================================================
             if is_sniper_armed and target_buy_price > 0 and curr_p <= target_buy_price:
-                
-                is_rev = cfg.get_reverse_state(t).get("is_active", False)
-                if is_rev:
-                    sniper_budget = cfg.get_escrow_cash(t) / 4.0
-                else:
-                    split = cfg.get_split_count(t)
-                    sniper_budget = cfg.get_seed(t) / split if split > 0 else 0
-                
-                if sniper_budget < curr_p:
-                    continue 
-
-                await asyncio.to_thread(broker.cancel_all_orders_safe, t, side="BUY")
-                await asyncio.sleep(1.0)
-                
-                hunt_success = False
-                
-                for attempt in range(3):
-                    if target_buy_price > 0:
-                        buy_qty = math.floor(sniper_budget / target_buy_price)
-                        if buy_qty > 0:
-                            res = broker.send_order(t, "BUY", buy_qty, target_buy_price, "LIMIT")
-                            if res.get('rt_cd') == '0':
-                                await asyncio.sleep(2.0)
-                                unfilled = await asyncio.to_thread(broker.get_unfilled_orders_detail, t)
-                                buy_unfilled = [o for o in unfilled if o.get('sll_buy_dvsn_cd') == '02']
-                                
-                                if not buy_unfilled:
-                                    cfg.set_lock(t, "SNIPER") 
-                                    
-                                    today_est_str = datetime.datetime.now(est).strftime('%Y%m%d')
-                                    execs = await asyncio.to_thread(broker.get_execution_history, t, today_est_str, today_est_str)
-                                    
-                                    actual_buy_price = target_buy_price
-                                    if execs:
-                                        computed_price = get_actual_execution_price(execs, buy_qty, '02')
-                                        if computed_price > 0: actual_buy_price = computed_price
-
-                                    msg = f"💥 <b>[{t}] V20.0 절대 방어선 덫 명중! ({trigger_reason} 이탈)</b>\n"
-                                    msg += f"📉 실시간 현재가(${curr_p:.2f})가 <b>[절대 방어선]</b>(${target_buy_price:.2f})마저 뚫었습니다!\n"
-                                    msg += f"🎯 <b>최적의 실제 체결 단가(${actual_buy_price:.2f})에 {buy_qty}주 지정가 덫이 완벽하게 체결</b>되었습니다!\n"
-                                    msg += "🔫 당일 스나이퍼 매수 활동을 짜릿하게 종료합니다."
-                                    await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode='HTML')
-                                    hunt_success = True
-                                    break
-                                else:
-                                    await asyncio.to_thread(broker.cancel_all_orders_safe, t, side="BUY")
-                                    await asyncio.sleep(1.0)
+                if cfg.get_secret_mode():
+                    is_rev = cfg.get_reverse_state(t).get("is_active", False)
+                    if is_rev:
+                        sniper_budget = cfg.get_escrow_cash(t) / 4.0
+                    else:
+                        split = cfg.get_split_count(t)
+                        sniper_budget = cfg.get_seed(t) / split if split > 0 else 0
                     
-                    await asyncio.sleep(0.5)
-                
-                if hunt_success:
+                    if sniper_budget < curr_p:
+                        continue 
+
+                    # 1. 기존 LOC 주문 낚아채기 (취소)
+                    await asyncio.to_thread(broker.cancel_all_orders_safe, t, side="BUY")
+                    await asyncio.sleep(1.0)
+                    
+                    hunt_success = False
+                    
+                    for attempt in range(3):
+                        if target_buy_price > 0:
+                            # 2. 매도 1호가 당겨오기 (빠른 체결 목적)
+                            ask_price = await asyncio.to_thread(broker.get_ask_price, t)
+                            exec_price = ask_price if ask_price > 0 else curr_p
+                            
+                            buy_qty = math.floor(sniper_budget / exec_price)
+                            if buy_qty > 0:
+                                # 3. 지정가 매수 격발
+                                res = broker.send_order(t, "BUY", buy_qty, exec_price, "LIMIT")
+                                if res.get('rt_cd') == '0':
+                                    await asyncio.sleep(2.0)
+                                    unfilled = await asyncio.to_thread(broker.get_unfilled_orders_detail, t)
+                                    buy_unfilled = [o for o in unfilled if o.get('sll_buy_dvsn_cd') == '02']
+                                    
+                                    if not buy_unfilled:
+                                        cfg.set_lock(t, "SNIPER") 
+                                        
+                                        today_est_str = datetime.datetime.now(est).strftime('%Y%m%d')
+                                        execs = await asyncio.to_thread(broker.get_execution_history, t, today_est_str, today_est_str)
+                                        
+                                        actual_buy_price = exec_price
+                                        if execs:
+                                            computed_price = get_actual_execution_price(execs, buy_qty, '02')
+                                            if computed_price > 0: actual_buy_price = computed_price
+
+                                        msg = f"💥 <b>[{t}] V20.0 시크릿 모드 가로채기(Intercept) 명중!</b>\n"
+                                        msg += f"📉 실시간 현재가(${curr_p:.2f})가 <b>[{trigger_reason}]</b>(${target_buy_price:.2f})을 터치했습니다!\n"
+                                        msg += f"🎯 <b>매도 1호가(${actual_buy_price:.2f})를 즉시 낚아채어 {buy_qty}주 지정가 체결을 완료</b>했습니다!\n"
+                                        msg += "🔫 당일 스나이퍼 매수 활동을 짜릿하게 종료합니다."
+                                        await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode='HTML')
+                                        hunt_success = True
+                                        break
+                                    else:
+                                        await asyncio.to_thread(broker.cancel_all_orders_safe, t, side="BUY")
+                                        await asyncio.sleep(1.0)
+                        
+                        await asyncio.sleep(0.5)
+                    
+                    if hunt_success:
+                        continue
+
+                    now_ts = time.time()
+                    fail_history = app_data.setdefault('sniper_fail_ts', {})
+                    if now_ts - fail_history.get(t, 0) > 3600:
+                        msg = f"🛡️ <b>[{t}] V20.0 가로채기 덫 기습 실패 (1시간 쿨타임 진입)</b>\n"
+                        msg += f"📉 동적 방어선(${target_buy_price:.2f})에 3회 지정가 덫을 던졌으나 잔량이 남았습니다.\n"
+                        msg += f"🦇 스나이퍼는 1시간 동안 숨을 죽이며, 일반 방어 매수(LOC) 주문을 호가창에 원상 복구합니다."
+                        await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode='HTML')
+                        fail_history[t] = now_ts
+                    
+                    ma_5day = await asyncio.to_thread(broker.get_5day_ma, t)
+                    plan = strategy.get_plan(t, curr_p, avg_price, qty, prev_c, ma_5day=ma_5day, market_type="REG", available_cash=allocated_cash[t], force_turbo_off=force_turbo_off)
+                    
+                    for o in plan.get('core_orders', []) + plan.get('bonus_orders', []):
+                        if o['side'] == 'BUY':
+                            broker.send_order(t, o['side'], o['qty'], o['price'], o['type'])
+                            await asyncio.sleep(0.2)
+                            
                     continue
 
-                now_ts = time.time()
-                fail_history = app_data.setdefault('sniper_fail_ts', {})
-                if now_ts - fail_history.get(t, 0) > 3600:
-                    msg = f"🛡️ <b>[{t}] V20.0 절대 방어선 덫 기습 실패 (1시간 쿨타임 진입)</b>\n"
-                    msg += f"📉 절대 방어선(${target_buy_price:.2f})에 3회 덫을 놓았으나 전량 체결되지 않았습니다.\n"
-                    msg += f"🦇 스나이퍼는 1시간 동안 숨을 죽이며, 일반 방어 매수(LOC) 주문을 호가창에 원상 복구합니다."
-                    await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode='HTML')
-                    fail_history[t] = now_ts
-                
-                ma_5day = await asyncio.to_thread(broker.get_5day_ma, t)
-                plan = strategy.get_plan(t, curr_p, avg_price, qty, prev_c, ma_5day=ma_5day, market_type="REG", available_cash=allocated_cash[t], force_turbo_off=force_turbo_off)
-                
-                for o in plan.get('core_orders', []) + plan.get('bonus_orders', []):
-                    if o['side'] == 'BUY':
-                        broker.send_order(t, o['side'], o['qty'], o['price'], o['type'])
-                        await asyncio.sleep(0.2)
-                        
-                continue
-
+            # ==========================================================
+            # 아래는 기존 V17 익절 로직 (잭팟 및 쿼터 익절) - 정상 유지
+            # ==========================================================
             target_pct_val = cfg.get_target_profit(t)
             target_price = math.ceil(avg_price * (1 + target_pct_val / 100.0) * 100) / 100.0
             
@@ -570,7 +596,7 @@ def main():
     latest_version = cfg.get_latest_version() 
     
     print("=" * 50)
-    print(f"🚀 방치형 자동매매 {latest_version} (방탄 아키텍처 적용 완료)")
+    print(f"🚀 방치형 자동매매 {latest_version} (V20 아키텍처 탑재)")
     print(f"📅 날짜 정보: {season_msg}")
     print(f"⏰ 자동 동기화: 08:30(여름) / 09:30(겨울) 자동 변경")
     print("=" * 50)

@@ -32,13 +32,14 @@ class ConfigManager:
             "SPLIT": "data/split_config.json",
             "TICKER": "data/active_tickers.json",
             "TURBO": "data/turbo_mode.dat",
+            "SECRET_MODE": "data/secret_mode.dat",  # 🔥 V20: 시크릿 모드(가로채기) ON/OFF 토글
             "PROFIT_CFG": "data/profit_config.json",
             "LOCKS": "data/trade_locks.json",
             "SEED_CFG": "data/seed_config.json",         
             "COMPOUND_CFG": "data/compound_config.json",
             "VERSION_CFG": "data/version_config.json",
             "REVERSE_CFG": "data/reverse_config.json",
-            "SNIPER_CFG": "data/sniper_config.json",
+            "SNIPER_MULTIPLIER_CFG": "data/sniper_multiplier.json", # 🔥 V20: 고정 퍼센트 대신 가중치 파일로 교체
             "SPLIT_HISTORY": "data/split_history.json" 
         }
         
@@ -47,7 +48,9 @@ class ConfigManager:
         self.DEFAULT_TARGET = {"SOXL": 12.0, "TQQQ": 10.0}
         self.DEFAULT_COMPOUND = {"SOXL": 70.0, "TQQQ": 70.0}
         self.DEFAULT_VERSION = {"SOXL": "V14", "TQQQ": "V14"}
-        self.DEFAULT_SNIPER = {"SOXL": 9.0, "TQQQ": 5.0}
+        
+        # 🔥 V20: 종목별 스나이퍼 최적화 가중치 (SOXL 야생마 1.0 / TQQQ 항공모함 0.9)
+        self.DEFAULT_SNIPER_MULTIPLIER = {"SOXL": 1.0, "TQQQ": 0.9}
 
     def _load_json(self, filename, default=None):
         if os.path.exists(filename):
@@ -508,20 +511,28 @@ class ConfigManager:
     def get_target_profit(self, t):
         return self._load_json(self.FILES["PROFIT_CFG"], self.DEFAULT_TARGET).get(t, 10.0)
         
-    def get_sniper_trigger(self, t):
-        default_val = self.DEFAULT_SNIPER.get(t, 9.0)
-        return float(self._load_json(self.FILES["SNIPER_CFG"], self.DEFAULT_SNIPER).get(t, default_val))
+    # 🔥 V20 추가: 스나이퍼 가중치(Multiplier) Getter/Setter
+    def get_sniper_multiplier(self, t):
+        default_val = self.DEFAULT_SNIPER_MULTIPLIER.get(t, 1.0)
+        return float(self._load_json(self.FILES["SNIPER_MULTIPLIER_CFG"], self.DEFAULT_SNIPER_MULTIPLIER).get(t, default_val))
         
-    def set_sniper_trigger(self, t, v):
-        d = self._load_json(self.FILES["SNIPER_CFG"], self.DEFAULT_SNIPER)
+    def set_sniper_multiplier(self, t, v):
+        d = self._load_json(self.FILES["SNIPER_MULTIPLIER_CFG"], self.DEFAULT_SNIPER_MULTIPLIER)
         d[t] = float(v)
-        self._save_json(self.FILES["SNIPER_CFG"], d)
+        self._save_json(self.FILES["SNIPER_MULTIPLIER_CFG"], d)
 
     def get_turbo_mode(self):
         return self._load_file(self.FILES["TURBO"]) == 'True'
 
     def set_turbo_mode(self, v):
         self._save_file(self.FILES["TURBO"], str(v))
+
+    # 🔥 V20 추가: 시크릿 모드(가로채기 기능) ON/OFF
+    def get_secret_mode(self):
+        return self._load_file(self.FILES["SECRET_MODE"]) == 'True'
+
+    def set_secret_mode(self, v):
+        self._save_file(self.FILES["SECRET_MODE"], str(v))
 
     def get_active_tickers(self):
         return self._load_json(self.FILES["TICKER"], ["SOXL", "TQQQ"])
@@ -535,4 +546,3 @@ class ConfigManager:
 
     def set_chat_id(self, v):
         self._save_file(self.FILES["CHAT_ID"], v)
-
