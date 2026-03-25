@@ -11,6 +11,7 @@ import time
 import math
 import asyncio
 import glob
+import random
 import pandas_market_calendars as mcal
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 from dotenv import load_dotenv
@@ -635,7 +636,19 @@ async def scheduled_regular_trade(context):
     cfg, broker, strategy, tx_lock = app_data['cfg'], app_data['broker'], app_data['strategy'], app_data['tx_lock']
     
     latest_version = cfg.get_latest_version()
-    await context.bot.send_message(chat_id=chat_id, text=f"🌃 <b>[{target_hour}:30] 다이내믹 스노우볼 {latest_version} 정규장 주문을 준비합니다.</b> (통신 지연 시 최대 15회 자동 재시도)", parse_mode='HTML')
+
+    # 💡 [핵심 패치] 천둥소리를 내는 소떼(Thundering Herd) 현상 방지를 위한 무작위 지터(Jitter) 생성
+    jitter_seconds = random.randint(0, 180) # 0초 ~ 180초(3분) 무작위 대기
+
+    await context.bot.send_message(
+        chat_id=chat_id, 
+        text=f"🌃 <b>[{target_hour}:30] 다이내믹 스노우볼 {latest_version} 정규장 주문 준비!</b>\n"
+             f"🛡️ 서버 접속 부하(동시접속) 방지를 위해 <b>{jitter_seconds}초</b> 대기 후 안전하게 주문 전송을 시작합니다.", 
+        parse_mode='HTML'
+    )
+
+    # 무작위 시간만큼 똑똑하게 대기
+    await asyncio.sleep(jitter_seconds)
 
     MAX_RETRIES = 15
     RETRY_DELAY = 60

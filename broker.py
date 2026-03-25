@@ -1,3 +1,7 @@
+# ==========================================================
+# [broker.py]
+# ⚠️ 이 주석 및 파일명 표기는 절대 지우지 마세요.
+# ==========================================================
 
 import requests
 import json
@@ -594,7 +598,14 @@ class KoreaInvestmentBroker:
                 current_price = today_df['Close'].iloc[-1]
                 gap_pct = ((current_price - last_close_past) / last_close_past) * 100
                 
-                if gap_pct <= -1.0:
+                # 💡 [패닉장 임계값 분리 로직 적용]
+                panic_threshold = -1.0
+                if index_ticker == "QQQ":
+                    panic_threshold = -1.0  # TQQQ(QQQ) 전용 패닉장 하한선 (원할 경우 -0.75 등으로 조정 가능)
+                elif index_ticker == "SOXX":
+                    panic_threshold = -1.0  # SOXL(SOXX) 전용 패닉장 하한선
+                
+                if gap_pct <= panic_threshold:
                     is_panic = True
             
             exp_5d = (last_atr_5 / last_close_past) * 100 * 3 if last_close_past > 0 else 0

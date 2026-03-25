@@ -272,7 +272,8 @@ class InfiniteStrategy:
                     
                 if version == "V17":
                     if can_buy and p_avg > 0:
-                        smart_core_orders.append({"side": "BUY", "price": p_avg, "qty": N, "type": "LOC", "desc": "🦇스마트방어(평단)"})
+                        # 👇 요청하신 명칭 "(평단)" 제거 수술 부위 (100% 원본 보존 후 교정 완료)
+                        smart_core_orders.append({"side": "BUY", "price": p_avg, "qty": N, "type": "LOC", "desc": "🦇스마트방어"})
                         for i in range(1, 6):
                             j_price = self._floor(one_portion_amt / (N + i))
                             c_j_price = round(min(j_price, p_avg - 0.01), 2)
