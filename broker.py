@@ -620,11 +620,9 @@ class KoreaInvestmentBroker:
             
             hybrid = max(exp_5d, exp_14d * 0.8)
             
-            if is_panic:
-                final_target = hybrid * 1.0
-            else:
-                final_target = hybrid * weight
-                final_target = min(final_target, 10.0) 
+            # 💡 [승승장군 핵심 수술] 패닉 릴리스 해제 및 10.0% 상한선 고정 방어막 적용
+            final_target = hybrid * weight
+            final_target = min(final_target, 10.0) 
             
             class TargetFloat(float):
                 pass
