@@ -93,7 +93,8 @@ class InfiniteStrategy:
                     else:
                         exit_target = default_exit
 
-                    if market_type == "REG":
+                    # 💡 [핵심 수술 완료] 시뮬레이션(단순 조회) 상태일 때는 타임 패러독스 방지를 위해 파일 쓰기 원천 차단
+                    if market_type == "REG" and not is_simulation:
                         self.cfg.set_reverse_state(ticker, True, rev_day, exit_target)
         else:
             one_portion_amt = base_portion
@@ -200,8 +201,6 @@ class InfiniteStrategy:
                             if jup_price > 0:
                                 bonus_orders.append({"side": "BUY", "price": jup_price, "qty": 1, "type": "LOC", "desc": f"🧹리버스줍줍({i})" })
                 
-                # 💡 [치명적 맹점 제거 완료] 지시서 조회 시마다 일차가 다시 저장되어 멈춰버리던 코드를 영구 삭제했습니다!
-                        
                 # 리버스 모드 스나이퍼 상태 표출
                 if lock_s_sell: process_status = "🔫리버스(명중)"
                 if lock_s_buy and version == "V17":
@@ -280,17 +279,16 @@ class InfiniteStrategy:
             # ==========================================================
             if qty > 0:
                 if lock_s_sell:
-                    # 상방 스나이퍼 명중 시 당일 쿼터 매도는 화면에서 숨기고 전량 목표 매도로 묶음
-                    q_qty = 0
-                    rem_qty = qty
+                    # 💡 [핵심 수술] 상방 스나이퍼 명중 시 쿼터/목표 매도를 지시서(UI)에서 완전히 은닉하여 찌꺼기 방지
+                    pass
                 else:
                     q_qty = math.ceil(qty / 4)
                     rem_qty = qty - q_qty
                 
-                if star_price > 0 and q_qty > 0:
-                    core_orders.append({"side": "SELL", "price": star_price, "qty": q_qty, "type": "LOC", "desc": "🌟별값매도"})
-                if target_price > 0 and rem_qty > 0:
-                    core_orders.append({"side": "SELL", "price": target_price, "qty": rem_qty, "type": "LIMIT", "desc": "🎯목표매도"})
+                    if star_price > 0 and q_qty > 0:
+                        core_orders.append({"side": "SELL", "price": star_price, "qty": q_qty, "type": "LOC", "desc": "🌟별값매도"})
+                    if target_price > 0 and rem_qty > 0:
+                        core_orders.append({"side": "SELL", "price": target_price, "qty": rem_qty, "type": "LIMIT", "desc": "🎯목표매도"})
 
             # 💡 [플랜B 완전히 도려냄] 전반전에 스나이퍼 명중해도 더 이상 매수 주문을 건드리지 않습니다!
             # 오직 텔레그램 UI 상태값만 스나이퍼가 명중했음을 표시합니다.

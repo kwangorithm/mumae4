@@ -12,6 +12,7 @@ import math
 import asyncio
 import glob
 import random
+import json
 import pandas_market_calendars as mcal
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 from dotenv import load_dotenv
@@ -319,6 +320,11 @@ async def scheduled_sniper_monitor(context):
         target_cache['date'] = today_est_str
         tracking_cache.clear()
         tracking_cache['date'] = today_est_str
+        # 💡 [디스크 영구 저장 기능] 날짜가 바뀌면 전날 남아있던 스나이퍼 캐시 파일 깔끔하게 청소
+        try:
+            for _f in glob.glob("data/sniper_cache_*.json"):
+                os.remove(_f)
+        except: pass
     
     async def _do_sniper():
         async with tx_lock:
@@ -357,7 +363,6 @@ async def scheduled_sniper_monitor(context):
                     else:
                         target_cache[t] = {'value': (9.0 if t=="SOXL" else 5.0), 'weight': current_weight}
 
-                # 💡 [V21.7 패치] 동적 패닉장 2.0% 타점 변환 로직 연동
                 sniper_pct = target_cache[t]['value']
                 raw_target_price = prev_c * (1 - (sniper_pct / 100.0))
                 target_buy_price = math.floor(raw_target_price * 100) / 100.0
@@ -367,17 +372,15 @@ async def scheduled_sniper_monitor(context):
                 tracking_info = tracking_cache.setdefault(t, {'is_tracking': False, 'lowest_price': float('inf'), 'alerted': False})
                 
                 # =========================================================================
-                # 1. 능동형 추적 하방 스나이퍼 매수 (Active Tracking Intercept - 거래량 하이브리드)
+                # 1. 능동형 추적 하방 스나이퍼 매수
                 # =========================================================================
                 if not lock_buy and is_sniper_armed and target_buy_price > 0:
-                    # 💡 5분봉 데이터 획득 (거래량 및 Vol_MA20 포함된 신형 엔진)
                     candle = await asyncio.to_thread(broker.get_current_5min_candle, t)
                     
                     if candle:
                         c_open, c_high, c_low, c_close = candle['open'], candle['high'], candle['low'], candle['close']
                         c_vol, c_vol_ma20 = candle['volume'], candle['vol_ma20']
                         
-                        # 1단계: 방어선 하향 돌파 시 추적 모드 가동
                         if not tracking_info['is_tracking'] and c_low <= target_buy_price:
                             tracking_info['is_tracking'] = True
                             tracking_info['lowest_price'] = c_low
@@ -389,7 +392,6 @@ async def scheduled_sniper_monitor(context):
                                 await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode='HTML')
                                 tracking_info['alerted'] = True
                         
-                        # 2단계: 바닥 갱신 및 3단계: 양봉 반등 + 거래량 하이브리드 필터 확인 사살
                         if tracking_info['is_tracking']:
                             if c_low < tracking_info['lowest_price']:
                                 tracking_info['lowest_price'] = c_low
@@ -398,8 +400,6 @@ async def scheduled_sniper_monitor(context):
                             is_yangbong = c_close > c_open
                             rebound_pct = (c_high - tracking_info['lowest_price']) / tracking_info['lowest_price'] * 100
                             is_rebounded = rebound_pct >= trigger_pct
-                            
-                            # 💡 [승승장군 핵심 수술] 5분봉 거래량이 최근 100분 평균 거래량(Vol_MA20)을 돌파했는지 확인 (데드캣 बा운스 차단)
                             is_volume_spike = c_vol > c_vol_ma20
                             
                             if is_yangbong and is_rebounded and is_volume_spike:
@@ -410,7 +410,6 @@ async def scheduled_sniper_monitor(context):
                                         split = cfg.get_split_count(t)
                                         sniper_budget = cfg.get_seed(t) / split if split > 0 else 0
                                     
-                                    # 제2원칙: 상한선 강력 방어 (절대 target_buy_price를 초과하지 않음)
                                     exec_price = min(c_close, target_buy_price)
                                     
                                     if sniper_budget >= exec_price:
@@ -455,6 +454,15 @@ async def scheduled_sniper_monitor(context):
                                         
                                         if hunt_success:
                                             cfg.set_lock(t, "SNIPER_BUY") 
+                                            # 💡 [디스크 영구 저장 기능] 실제 체결 가격을 RAM과 하드디스크에 동시 저장
+                                            tracking_info['hit_price'] = actual_buy_price
+                                            tracking_info['is_tracking'] = False
+                                            
+                                            try:
+                                                with open(f"data/sniper_cache_{t}.json", "w") as f:
+                                                    json.dump({"hit_price": actual_buy_price, "lowest_price": tracking_info['lowest_price']}, f)
+                                            except: pass
+                                            
                                             msg = f"💥 <b>[{t}] 하이브리드 추적 스나이퍼 명중!</b>\n"
                                             msg += f"📉 <b>최저점: ${tracking_info['lowest_price']:.2f}</b>\n"
                                             msg += f"📈 <b>반등 양봉 포착 (+{trigger_pct}% 돌파)</b>\n"
@@ -646,11 +654,11 @@ async def scheduled_sniper_monitor(context):
                         
                         msg = f"🔫 <b>[{t}] V17 시크릿 쿼터 익절 발동! ({phase})</b>\n"
                         msg += f"🎯 실시간 매수 1호가: ${bid_price:.2f} (트리거: ${trigger_price:.2f})\n"
-                        msg += f"🛡️ 기존 쿼터 방어선만 해제하고 {q_qty}주를 <b>최적의 단가 ${actual_sell_price:.2f}에 즉시 낚아챘습니다!</b>\n"
+                        msg += f"🛡️ 기존 쿼터 방어선만 해제하고 {q_qty}주를 <b>최적 단가 ${actual_sell_price:.2f}에 즉시 낚아챘습니다!</b>\n"
                         
                         if not is_rev:
                             if is_first_half:
-                                msg += "\n🛡️ <b>[공수 완벽 분리 원칙 적용]</b>\n└ 쿼터 익절 성공(전반전)! 기존 0.5회분 강제 매수(LOC) 주문은 절대 취소하지 않고 온전히 유지하여 눈덩이를 계속 키웁니다. (오리지널 무매 원칙)"
+                                msg += "\n🛡️ <b>[공수 완벽 분리 원칙 적용]</b>\n└ 쿼터 익절 성공(전반전)! 기존 0.5회분 강제 매수(LOC) 주문은 절대 취소하지 않고 온전히 유지하여 눈덩이를 계속 키웁니다."
                             else:
                                 msg += "\n🛡️ <b>[공수 완벽 분리 원칙 적용]</b>\n└ 쿼터 익절 성공(후반전)! 기존 하방 매수(LOC) 주문은 전혀 건드리지 않고 그대로 유지하며 스나이퍼 감시를 계속합니다."
                         else:
