@@ -12,12 +12,16 @@ class InfiniteStrategy:
     def _ceil(self, val): return math.ceil(val * 100) / 100.0
     def _floor(self, val): return math.floor(val * 100) / 100.0
 
-    def get_plan(self, ticker, current_price, avg_price, qty, prev_close, ma_5day=0.0, market_type="REG", available_cash=0, is_simulation=False, force_turbo_off=False):
+    def get_plan(self, ticker, current_price, avg_price, qty, prev_close, ma_5day=0.0, market_type="REG", available_cash=0, is_simulation=False):
         core_orders = []
         bonus_orders = []
         smart_core_orders = []   
         smart_bonus_orders = []  
         process_status = "" 
+        
+        # 스나이퍼 잠금 상태 실시간 확인
+        lock_s_sell = self.cfg.check_lock(ticker, "SNIPER_SELL")
+        lock_s_buy = self.cfg.check_lock(ticker, "SNIPER_BUY")
         
         # ==========================================================
         # 🛡️ [V18.13 패치] KIS 자전거래(Wash-Trade) 원천 차단 방어벽 엔진
@@ -42,7 +46,7 @@ class InfiniteStrategy:
                             if "🛡️" not in o['desc']: 
                                 o['desc'] = f"🛡️교정_{o['desc'].replace('🦇', '').replace('🧹', '')}"
                         
-                        # 🎯 [V20.2 핫픽스] 마이너스 호가 방어막 공통 적용 (자전거래 방패 내부에서도)
+                        # 🎯 마이너스 호가 방어막 공통 적용
                         o['price'] = max(0.01, o['price'])
                             
                     res.append(o)
@@ -76,8 +80,6 @@ class InfiniteStrategy:
             
             if not is_reverse and (t_val > (split - 1) or (qty > 0 and is_money_short_check)):
                 if is_jackpot_reached:
-                    # 🚀 [V21.4 로직 3 패치] 대박 익절 모드 전환 (리버스 생략)
-                    # 목표 수익률에 도달했다면 리버스 감옥에 가지 않고 그대로 익절 페이즈로 부드럽게 넘어갑니다.
                     pass
                 else:
                     is_reverse = True 
@@ -91,7 +93,7 @@ class InfiniteStrategy:
                     else:
                         exit_target = default_exit
 
-                    if market_type == "REG":
+                    if market_type == "REG" and not is_simulation:
                         self.cfg.set_reverse_state(ticker, True, rev_day, exit_target)
         else:
             one_portion_amt = base_portion
@@ -100,11 +102,33 @@ class InfiniteStrategy:
         star_ratio = target_ratio - (target_ratio * depreciation_factor * t_val)
         
         if is_reverse:
-            if ma_5day > 0: star_price = round(ma_5day, 2)
-            else: star_price = round(avg_price, 2)
+            safe_floor_price = math.ceil(avg_price * 1.005 * 100) / 100.0
+            
+            if ma_5day > 0: 
+                star_price = max(round(ma_5day, 2), safe_floor_price)
+            else: 
+                star_price = safe_floor_price
 
-            escrow_cash = self.cfg.get_escrow_cash(ticker)
-            one_portion_amt = (escrow_cash / 4.0) if escrow_cash > 0 else base_portion
+            ledger = self.cfg.get_ledger()
+            buys_after_last_sell = 0.0
+            
+            for r in reversed(ledger):
+                if r.get('ticker') == ticker:
+                    if r.get('is_reverse', False):
+                        if r['side'] == 'BUY':
+                            buys_after_last_sell += (r['qty'] * r['price'])
+                        elif r['side'] == 'SELL':
+                            break
+                    else:
+                        break
+            
+            current_escrow = self.cfg.get_escrow_cash(ticker)
+            escrow_at_last_transfusion = current_escrow + buys_after_last_sell
+            
+            if escrow_at_last_transfusion > 0:
+                one_portion_amt = escrow_at_last_transfusion / 4.0
+            else:
+                one_portion_amt = base_portion
         else:
             star_price = self._ceil(avg_price * (1 + star_ratio)) if avg_price > 0 else 0
             
@@ -115,32 +139,30 @@ class InfiniteStrategy:
 
         base_price = current_price if current_price > 0 else prev_close
         if base_price <= 0: 
-            return {"orders": [], "core_orders": [], "bonus_orders": [], "smart_core_orders": [], "smart_bonus_orders": [], "t_val": t_val, "one_portion": one_portion_amt, "process_status": "⛔가격오류", "is_reverse": is_reverse, "star_price": star_price, "star_ratio": star_ratio, "real_cash_used": real_available_cash}
+            return {"orders": [], "core_orders": [], "bonus_orders": [], "smart_core_orders": [], "smart_bonus_orders": [], "t_val": t_val, "one_portion": one_portion_amt, "process_status": "⛔가격오류", "is_reverse": is_reverse, "star_price": star_price, "star_ratio": star_ratio, "real_cash_used": real_available_cash, "tracking_info": {}}
 
         if market_type == "PRE_CHECK":
             process_status = "🌅프리마켓"
             if qty > 0 and target_price > 0 and current_price >= target_price and not is_reverse:
                 core_orders.append({"side": "SELL", "price": current_price, "qty": qty, "type": "LIMIT", "desc": "🌅프리:목표돌파익절"})
             orders = core_orders + bonus_orders
-            return {"orders": orders, "core_orders": core_orders, "bonus_orders": bonus_orders, "smart_core_orders": [], "smart_bonus_orders": [], "t_val": t_val, "one_portion": one_portion_amt, "process_status": process_status, "is_reverse": is_reverse, "star_price": star_price, "star_ratio": star_ratio, "real_cash_used": real_available_cash}
+            return {"orders": orders, "core_orders": core_orders, "bonus_orders": bonus_orders, "smart_core_orders": [], "smart_bonus_orders": [], "t_val": t_val, "one_portion": one_portion_amt, "process_status": process_status, "is_reverse": is_reverse, "star_price": star_price, "star_ratio": star_ratio, "real_cash_used": real_available_cash, "tracking_info": {}}
 
         if market_type == "REG":
             if qty == 0:
                 process_status = "✨새출발"
-                # 🎯 [V20.2 핫픽스] 마이너스 호가 하한선 방어
                 buy_price = max(0.01, round(self._ceil(base_price * 1.15) - 0.01, 2))
                 buy_qty = math.floor(one_portion_amt / buy_price) if buy_price > 0 else 0
                 if buy_qty > 0:
                     core_orders.append({"side": "BUY", "price": buy_price, "qty": buy_qty, "type": "LOC", "desc": "🆕새출발"})
                 orders = core_orders + bonus_orders
-                return {"orders": orders, "core_orders": core_orders, "bonus_orders": bonus_orders, "smart_core_orders": [], "smart_bonus_orders": [], "t_val": t_val, "one_portion": one_portion_amt, "process_status": process_status, "is_reverse": False, "star_price": star_price, "star_ratio": star_ratio, "real_cash_used": real_available_cash}
+                return {"orders": orders, "core_orders": core_orders, "bonus_orders": bonus_orders, "smart_core_orders": [], "smart_bonus_orders": [], "t_val": t_val, "one_portion": one_portion_amt, "process_status": process_status, "is_reverse": False, "star_price": star_price, "star_ratio": star_ratio, "real_cash_used": real_available_cash, "tracking_info": {}}
 
             if is_reverse:
                 sell_divisor = 10 if split <= 20 else 20
                 
-                # 🎯 [V21.4 로직 2 패치] 리버스 최소 4주 매도 보장 & 수량 부족 시 전량 청산
                 if qty < 4:
-                    sell_qty = qty # 4주도 안 남았으면 분할 불가하므로 그냥 잔량 전량 청산
+                    sell_qty = qty 
                 else:
                     sell_qty = max(4, math.floor(qty / sell_divisor)) 
 
@@ -158,14 +180,13 @@ class InfiniteStrategy:
                     buy_qty = 0
                     buy_price = 0
                     if one_portion_amt > 0 and star_price > 0:
-                        # 🎯 [V20.2 핫픽스] 마이너스 호가 하한선 방어
                         buy_price = max(0.01, round(star_price - 0.01, 2))
                         if buy_price > 0: 
                             buy_qty = math.floor(one_portion_amt / buy_price)
                             if buy_qty > 0:
                                 core_orders.append({"side": "BUY", "price": buy_price, "qty": buy_qty, "type": "LOC", "desc": "⚓잔금매수"})
                     
-                    if sell_qty > 0 and star_price > 0:
+                    if not lock_s_sell and sell_qty > 0 and star_price > 0:
                         core_orders.append({"side": "SELL", "price": star_price, "qty": sell_qty, "type": "LOC", "desc": "🌟별값매도"})
 
                     if one_portion_amt > 0 and buy_price > 0:
@@ -173,17 +194,19 @@ class InfiniteStrategy:
                             target_qty = buy_qty + i 
                             raw_jup_price = self._floor(one_portion_amt / target_qty)
                             capped_jup_price = min(raw_jup_price, buy_price - 0.01)
-                            # 🎯 [V20.2 핫픽스] 마이너스 호가 하한선 방어
                             jup_price = max(0.01, round(capped_jup_price, 2))
                             if jup_price > 0:
                                 bonus_orders.append({"side": "BUY", "price": jup_price, "qty": 1, "type": "LOC", "desc": f"🧹리버스줍줍({i})" })
                 
-                if market_type == "REG":
-                    self.cfg.set_reverse_state(ticker, True, rev_day, exit_target)
-                        
+                if lock_s_sell: process_status = "🔫리버스(명중)"
+                if lock_s_buy and version == "V17":
+                    core_orders = [o for o in core_orders if o['side'] != 'BUY']
+                    bonus_orders = [o for o in bonus_orders if o['side'] != 'BUY']
+                    process_status = "💥가로채기(명중)"
+
                 core_orders, bonus_orders, smart_core_orders, smart_bonus_orders = apply_wash_trade_shield(core_orders, bonus_orders, smart_core_orders, smart_bonus_orders)        
                 orders = core_orders + bonus_orders
-                return {"orders": orders, "core_orders": core_orders, "bonus_orders": bonus_orders, "smart_core_orders": [], "smart_bonus_orders": [], "t_val": t_val, "one_portion": one_portion_amt, "process_status": process_status, "is_reverse": is_reverse, "star_price": star_price, "star_ratio": star_ratio, "real_cash_used": real_available_cash}
+                return {"orders": orders, "core_orders": core_orders, "bonus_orders": bonus_orders, "smart_core_orders": [], "smart_bonus_orders": [], "t_val": t_val, "one_portion": one_portion_amt, "process_status": process_status, "is_reverse": is_reverse, "star_price": star_price, "star_ratio": star_ratio, "real_cash_used": real_available_cash, "tracking_info": {}}
 
             if is_jackpot_reached and (t_val > (split - 1) or is_money_short):
                 process_status = "🎉대박익절(리버스생략)"
@@ -192,32 +215,20 @@ class InfiniteStrategy:
             elif t_val < (split / 2): process_status = "🌓전반전"
             else: process_status = "🌕후반전"
 
-            # 🎯 [V20.2 핫픽스] T값 비정상 폭주(수동 매수, 시드 오류) 감지 꼬리표
             if t_val > (split * 1.1):
                 process_status = "🚨T값폭주(역산경고)"
 
             can_buy = not is_money_short and not is_last_lap
-            is_turbo_active = False if force_turbo_off else self.cfg.get_turbo_mode()
             
+            # 💡 [핵심 수술] 가속 매수(Turbo Mode) 원천 삭제 (강제 1.0회분 뻥튀기 로직 영구 소각)
+            is_turbo_active = False 
             safe_ceiling = min(avg_price, star_price) if star_price > 0 else avg_price
-
-            if is_turbo_active and not is_last_lap:
-                if is_simulation or real_available_cash >= one_portion_amt:
-                    ref_price = min(avg_price, prev_close)
-                    raw_turbo = self._ceil(ref_price * 0.95) - 0.01
-                    # 🎯 [V20.2 핫픽스] 마이너스 호가 하한선 방어
-                    turbo_price = max(0.01, round(min(raw_turbo, safe_ceiling - 0.01), 2))
-                    turbo_qty = math.floor(one_portion_amt / turbo_price) if turbo_price > 0 else 0
-                    if turbo_qty > 0:
-                        core_orders.append({"side": "BUY", "price": turbo_price, "qty": turbo_qty, "type": "LOC", "desc": "🏎️가속매수"})
 
             standard_buy_qty = 0 
             N = math.floor(one_portion_amt / avg_price) if avg_price > 0 else 0
-            # 🎯 [V20.2 핫픽스] 마이너스 호가 하한선 방어
             p_avg = max(0.01, round(min(self._ceil(avg_price) - 0.01, safe_ceiling - 0.01), 2))
             
             if can_buy:
-                # 🎯 [V20.2 핫픽스] 마이너스 호가 하한선 방어
                 p_star = max(0.01, round(star_price - 0.01, 2))
 
                 if t_val < (split / 2):
@@ -247,34 +258,32 @@ class InfiniteStrategy:
                     for i in range(1, 6):
                         jup_price = self._floor(one_portion_amt / (base_qty_for_jup + i))
                         capped_jup_price = round(min(jup_price, avg_price - 0.01), 2)
-                        # 🎯 [V20.2 핫픽스] 마이너스 호가 하한선 방어
                         if capped_jup_price > 0:
                             safe_jup_price = max(0.01, capped_jup_price)
                             bonus_orders.append({"side": "BUY", "price": safe_jup_price, "qty": 1, "type": "LOC", "desc": f"🧹줍줍({i})"})
 
-            # ==========================================================
-            # 🚨 [V21.3 오리지널 룰 복구] 정규장 LOC 매도는 무조건 별값(star_price)
-            # ==========================================================
             if qty > 0:
-                q_qty = math.ceil(qty / 4)
-                rem_qty = qty - q_qty
+                if lock_s_sell:
+                    pass
+                else:
+                    q_qty = math.ceil(qty / 4)
+                    rem_qty = qty - q_qty
                 
-                # V17이든 V14이든 17:30 정규장 LOC 쿼터매도는 오리지널 무매 원칙을 철저히 준수함
-                if star_price > 0 and q_qty > 0:
-                    core_orders.append({"side": "SELL", "price": star_price, "qty": q_qty, "type": "LOC", "desc": "🌟별값매도"})
-                if target_price > 0 and rem_qty > 0:
-                    core_orders.append({"side": "SELL", "price": target_price, "qty": rem_qty, "type": "LIMIT", "desc": "🎯목표매도"})
-                    
-                # V17 스나이퍼(시크릿) 전용: 쿼터 익절 성공 시 관망 대비용 스마트 방어 매수 장전
-                if version == "V17":
-                    if can_buy and p_avg > 0:
-                        smart_core_orders.append({"side": "BUY", "price": p_avg, "qty": N, "type": "LOC", "desc": "🦇스마트방어(평단)"})
-                        for i in range(1, 6):
-                            j_price = self._floor(one_portion_amt / (N + i))
-                            c_j_price = round(min(j_price, p_avg - 0.01), 2)
-                            if c_j_price > 0:
-                                safe_c_j_price = max(0.01, c_j_price)
-                                smart_bonus_orders.append({"side": "BUY", "price": safe_c_j_price, "qty": 1, "type": "LOC", "desc": f"🧹스마트줍줍({i})"})
+                    if star_price > 0 and q_qty > 0:
+                        core_orders.append({"side": "SELL", "price": star_price, "qty": q_qty, "type": "LOC", "desc": "🌟별값매도"})
+                    if target_price > 0 and rem_qty > 0:
+                        core_orders.append({"side": "SELL", "price": target_price, "qty": rem_qty, "type": "LIMIT", "desc": "🎯목표매도"})
+
+            if lock_s_sell:
+                if version == "V17" and not is_reverse and t_val < (split / 2):
+                    process_status = "🔫전반전(명중/성장중)" 
+                else:
+                    process_status = "🔫스나이퍼(명중)"
+
+            if lock_s_buy and version == "V17":
+                core_orders = [o for o in core_orders if o['side'] != 'BUY']
+                bonus_orders = [o for o in bonus_orders if o['side'] != 'BUY']
+                process_status = "💥가로채기(명중)"
 
             core_orders, bonus_orders, smart_core_orders, smart_bonus_orders = apply_wash_trade_shield(core_orders, bonus_orders, smart_core_orders, smart_bonus_orders)        
             orders = core_orders + bonus_orders
@@ -284,5 +293,6 @@ class InfiniteStrategy:
                 "smart_core_orders": smart_core_orders, "smart_bonus_orders": smart_bonus_orders,
                 "t_val": t_val, "one_portion": one_portion_amt, "process_status": process_status,
                 "is_reverse": is_reverse, "star_price": star_price, "star_ratio": star_ratio,
-                "real_cash_used": real_available_cash
+                "real_cash_used": real_available_cash,
+                "tracking_info": {} 
             }

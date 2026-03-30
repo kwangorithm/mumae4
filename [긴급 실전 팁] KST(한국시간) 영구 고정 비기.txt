@@ -1,0 +1,57 @@
+
+안녕하세요! 오늘 프리장/정규장 진입을 앞두고 아주 아찔한 경험을 해서, 저와 똑같은 멘붕을 겪으실 분들을 위해 방금 전까지 서버와 사투를 벌인 날것의 경험담을 공유합니다.
+
+사건의 발단은 이렇습니다. 평소처럼 봇은 텔레그램 명령어에는 꼬박꼬박 대답을 잘하는데, 유독 17시 30분에 발사되어야 할 정규장 자동 주문 스케줄만 침묵하는 겁니다. 180초 랜덤 지연을 감안해서 17시 33분까지 기다려봤지만 감감무소식... 당장 본장이 코앞인데 말이죠!
+
+그래서 터미널을 열고 봇의 심박수를 까봤습니다.
+
+sudo systemctl status pipiosbot
+
+그런데 로그에 찍힌 시간이 충격적이었습니다.
+
+> Active: active (running) since Fri 2026-03-27 08:09:25 UTC
+> next run at: 2026-03-27 08:13:28 UTC
+
+제 봇은 KST(한국 시간) 17시 30분이 아니라, UTC(영국 런던 시간) 오전 8시 30분을 살고 있었습니다!
+AWS나 GCP 같은 클라우드 서버들은 주기적으로 커널 업데이트나 재부팅을 하면서, 지들 멋대로 서버 시간을 글로벌 표준시(UTC)로 초기화해 버립니다. 즉, 제 봇은 "아직 아침 8시 반이네? 정규장 주문 쏘려면 9시간 더 자야겠다~" 하고 퍼질러 자고 있었던 겁니다.
+부랴부랴 터미널에 명령어를 쳐서 서버 시간을 한국 시간으로 억지로 돌렸습니다.
+
+sudo timedatectl set-timezone Asia/Seoul
+sudo systemctl restart pipiosbot
+
+서버 시간(date)은 분명히 17시 15분 KST로 돌아왔는데, 봇 로그(journalctl -u pipiosbot -f)를 다시 까보니 파이썬 스케줄러는 여전히 next run at: ... 08:34:43 UTC 라고 헛소리를 하고 있었습니다!
+
+이유를 분석해 보니, 클라우드가 멋대로 시간을 돌려놓는 짓거리 자체를 원천 차단하지 않으면 또 재발할 게 뻔했습니다. 게다가 시스템 시간을 바꿔도 파이썬이 그걸 못 물고 올라가는 현상까지...
+결국 가장 무식하고 확실하게, 봇을 구동하는 시스템 파일의 심장부에 "너는 무조건 한국 시간으로만 눈을 떠라!" 하고 KST 환경변수를 대못으로 때려 박는 수술을 감행했습니다.
+
+저처럼 파일 열어서 코드 지우다가 삑사리 날까 봐 쫄리시는 분들을 위해, 터미널에서 통째로 덮어쓰는 1초 컷 스크립트를 공유합니다. (자신의 봇 이름과 경로가 다르다면 그 부분만 수정해서 쓰세요!)
+
+cat << 'EOF' > /etc/systemd/system/pipiosbot.service
+[Unit]
+Description=PIPIOS Trading Zombie Bot
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/pipios4006
+Environment="TZ=Asia/Seoul"
+ExecStart=/usr/bin/python3 /home/pipios4006/main.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl restart pipiosbot
+
+이걸 터미널에 통째로 복사해서 때려 넣는 순간!
+지긋지긋하게 살아있던 과거의 파이썬 프로세스(PID)가 죽고, 완벽하게 한국 시간의 뇌세포(TZ=Asia/Seoul)를 이식받은 새로운 봇이 부팅되었습니다.
+다시 로그를 까보니...
+
+> Mar 27 17:41:17 my-bot4006 python3[2213228]: ... Added job "scheduled_regular_trade"
+
+드디어 파이썬 내부 시간과 서버 시간이 KST 17시 41분으로 1초의 오차도 없이 일치했고, 정규장 스케줄 탄창이 완벽하게 장전되는 것을 두 눈으로 확인했습니다! (물론 오늘 17시 30분 타점은 지나버려서 HTS로 수동 주문을 넣어야 했지만요 😂)
+봇이 텔레그램 명령은 잘 받는데 스케줄만 안 도는 분들! 당장 로그 까보시고 시간대가 UTC로 되어 있다면, 위 스크립트로 영구적인 KST 대못을 박아버리시기 바랍니다. 클라우드가 제멋대로 영국 시간으로 돌려놓아도, 우리 봇은 무조건 한국 시간으로만 칼같이 일하게 됩니다! 🚀

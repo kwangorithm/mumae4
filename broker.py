@@ -2,6 +2,7 @@
 # [broker.py]
 # ⚠️ 이 주석 및 파일명 표기는 절대 지우지 마세요.
 # ==========================================================
+
 import requests
 import json
 import time
@@ -11,8 +12,9 @@ import math
 import yfinance as yf
 import pytz
 import tempfile
-import pandas as pd   # 🔥 V20 추가: 동적 타점 계산용
-import numpy as np    # 🔥 V20 추가: 동적 타점 계산용
+import pandas as pd   
+import numpy as np
+import volatility_engine as ve  # 💡 [V3.1 수술] 동적 변동성 엔진 연결 (이중 가중치)
 
 class KoreaInvestmentBroker:
     def __init__(self, app_key, app_secret, cano, acnt_prdt_cd="01"):
@@ -160,12 +162,14 @@ class KoreaInvestmentBroker:
 
     def get_account_balance(self):
         cash = 0.0
-        holdings = None 
+        holdings = {}
+        api_success = False 
         
         params = {"CANO": self.cano, "ACNT_PRDT_CD": self.acnt_prdt_cd, "WCRC_FRCR_DVSN_CD": "02", "NATN_CD": "840", "TR_MKET_CD": "00", "INQR_DVSN_CD": "00"}
         res = self._call_api("CTRP6504R", "/uapi/overseas-stock/v1/trading/inquire-present-balance", "GET", params=params)
         
         if res.get('rt_cd') == '0':
+            api_success = True
             o2 = res.get('output2', {})
             if isinstance(o2, list) and len(o2) > 0: o2 = o2[0]
             
@@ -176,7 +180,6 @@ class KoreaInvestmentBroker:
             raw_bp = dncl_amt + sll_amt - buy_amt
             cash = math.floor((raw_bp * 0.9945) * 100) / 100.0              
 
-        holdings = {}
         target_excgs = ["NASD", "AMEX", "NYSE"] 
         
         for excg in target_excgs:
@@ -184,6 +187,7 @@ class KoreaInvestmentBroker:
             res_hold = self._call_api("TTTS3012R", "/uapi/overseas-stock/v1/trading/inquire-balance", "GET", params_hold)
             
             if res_hold.get('rt_cd') == '0':
+                api_success = True
                 if cash <= 0:
                     o2 = res_hold.get('output2', {})
                     if isinstance(o2, list) and len(o2) > 0: o2 = o2[0]
@@ -197,7 +201,51 @@ class KoreaInvestmentBroker:
                     if qty > 0 and ticker not in holdings: 
                         holdings[ticker] = {'qty': qty, 'avg': avg}
         
-        return cash, holdings if holdings else None
+        if api_success:
+            return cash, holdings
+        else:
+            return cash, None
+
+    def get_current_5min_candle(self, ticker):
+        """
+        현재 시점 기준으로 진행 중인 가장 최근 5분 단위의 OHLC 캔들과 거래량 데이터를 반환합니다.
+        (MA20 휩소 필터링을 위해 period를 2d로 확장하고 Volume 합산 도출)
+        """
+        try:
+            stock = yf.Ticker(ticker)
+            df = stock.history(period="2d", interval="1m", prepost=True)
+            
+            if df.empty:
+                return None
+                
+            resampled = df.resample('5min', label='left', closed='left').agg({
+                'Open': 'first',
+                'High': 'max',
+                'Low': 'min',
+                'Close': 'last',
+                'Volume': 'sum'
+            }).dropna()
+            
+            if resampled.empty:
+                return None
+                
+            resampled['Vol_MA20'] = resampled['Volume'].rolling(20).mean()
+            
+            last_candle = resampled.iloc[-1]
+            
+            vol_ma20 = float(last_candle['Vol_MA20']) if not pd.isna(last_candle['Vol_MA20']) else float(last_candle['Volume'])
+            
+            return {
+                'open': float(last_candle['Open']),
+                'high': float(last_candle['High']),
+                'low': float(last_candle['Low']),
+                'close': float(last_candle['Close']),
+                'volume': float(last_candle['Volume']),
+                'vol_ma20': vol_ma20
+            }
+        except Exception as e:
+            print(f"⚠️ [Broker] 실시간 5분봉 캔들 조회 실패 ({ticker}): {e}")
+            return None
 
     def get_current_price(self, ticker, is_market_closed=False):
         try:
@@ -250,9 +298,25 @@ class KoreaInvestmentBroker:
         return 0.0
 
     def get_previous_close(self, ticker):
-        try: return float(yf.Ticker(ticker).fast_info['previous_close'])
+        try:
+            df = yf.download(ticker, period="5d", interval="1m", prepost=True, progress=False)
+            if not df.empty:
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.droplevel(1)
+                df.index = df.index.tz_convert('America/New_York')
+                now_est = datetime.datetime.now(pytz.timezone('America/New_York'))
+                if now_est.time() >= datetime.time(20, 0):
+                    last_completed_date = now_est.date()
+                else:
+                    last_completed_date = now_est.date() - datetime.timedelta(days=1)
+                
+                df_full = df.between_time('04:00', '19:59')
+                past_df = df_full[df_full.index.date <= last_completed_date]
+                
+                if not past_df.empty:
+                    return float(past_df['Close'].iloc[-1])
         except Exception as e:
-            print(f"⚠️ [야후 파이낸스] 전일종가 에러, 한투 API 우회 가동: {e}")
+            print(f"⚠️ [야후 파이낸스] 전일 애프터마켓 종가 에러, 한투 API 우회 가동: {e}")
 
         try:
             excg_cd = self._get_exchange_code(ticker, target_api="PRICE")
@@ -338,8 +402,12 @@ class KoreaInvestmentBroker:
         orders = self.get_unfilled_orders_detail(ticker)
         if not orders: return 0
         
-        target_orders = [o for o in orders if o.get('sll_buy_dvsn_cd') == sll_buy_cd and o.get('ord_dvsn_cd') == target_ord_dvsn]
-        
+        target_orders = []
+        for o in orders:
+            dvsn = o.get('ord_dvsn_cd') or o.get('ord_dvsn') or ''
+            if o.get('sll_buy_dvsn_cd') == sll_buy_cd and dvsn == target_ord_dvsn:
+                target_orders.append(o)
+                
         for o in target_orders:
             self.cancel_order(ticker, o.get('odno'))
             time.sleep(0.3)
@@ -507,66 +575,53 @@ class KoreaInvestmentBroker:
             print(f"⚠️ [야후 파이낸스] 액면분할 조회 에러: {e}")
         return 0.0, ""
 
-    def get_dynamic_sniper_target(self, index_ticker, weight=1.0):
+    def get_dynamic_sniper_target(self, index_ticker):
+        """
+        [V3.1+] 자율주행 동적 스나이퍼 타점 산출 (기초지수 1년 ATR 앵커 + 공포 가중치)
+        수동 가중치 및 고정 상수를 전면 폐기하고, volatility_engine을 호출하여 
+        기초지수 1년 ATR 기반의 3배수 동적 앵커와 실시간 공포 지수(VXN/HV) 기반 타격선을 반환합니다.
+        """
         try:
-            df = yf.download(index_ticker, period='1mo', interval='5m', prepost=True, progress=False)
-            if df.empty: 
-                return None
+            class TargetFloat(float):
+                pass
             
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.droplevel(1)
-                
-            df.index = df.index.tz_convert('America/New_York')
-            df = df.between_time('04:00', '16:00')
-            
-            daily_data = []
-            for date, group in df.groupby(df.index.date):
-                if group.empty: continue
-                daily_data.append({
-                    'Date': pd.to_datetime(date),
-                    'High': group['High'].max(),
-                    'Low': group['Low'].min(),
-                    'Close': group['Close'].iloc[-1]
-                })
-            daily_df = pd.DataFrame(daily_data).set_index('Date')
-            
-            est = pytz.timezone('America/New_York')
-            now_est = datetime.datetime.now(est)
-            today_date = now_est.date()
-            
-            if now_est.hour < 16:
-                daily_df = daily_df[daily_df.index.date < today_date]
+            if index_ticker == "SOXX":
+                # SOXL (기초지수 SOXX)
+                hv_val, weight, target_drop, base_amp = ve.get_soxl_target_drop_full()
+                ret = TargetFloat(target_drop)
+                ret.metric_val = hv_val
+                ret.weight = weight
+                ret.base_amp = base_amp
+                ret.metric_name = "SOXX 자체 HV"
+                ret.metric_base = round(hv_val / weight, 2) if weight > 0 else 25.0
             else:
-                daily_df = daily_df[daily_df.index.date <= today_date]
-                
-            if len(daily_df) < 15: 
-                return None 
-                
-            prev_c = daily_df['Close'].shift(1)
-            tr = pd.concat([
-                daily_df['High'] - daily_df['Low'],
-                abs(daily_df['High'] - prev_c),
-                abs(daily_df['Low'] - prev_c)
-            ], axis=1).max(axis=1)
+                # TQQQ (기초지수 QQQ, 공포지수 VXN)
+                vxn_val, weight, target_drop, base_amp = ve.get_tqqq_target_drop_full()
+                ret = TargetFloat(target_drop)
+                ret.metric_val = vxn_val
+                ret.weight = weight
+                ret.base_amp = base_amp
+                ret.metric_name = "프리마켓 VXN"
+                ret.metric_base = round(vxn_val / weight, 2) if weight > 0 else 20.0
             
-            atr_5d = tr.rolling(window=5).mean()
-            atr_14d = tr.rolling(window=14).mean()
+            ret.is_panic = False
+            ret.gap_pct = 0.0 
             
-            last_atr_5 = atr_5d.iloc[-1]
-            last_atr_14 = atr_14d.iloc[-1]
-            last_close = daily_df['Close'].iloc[-1]
-            
-            exp_5d = (last_atr_5 / last_close) * 100 * 3
-            exp_14d = (last_atr_14 / last_close) * 100 * 3
-            
-            hybrid = max(exp_5d, exp_14d * 0.8)
-            final_target = hybrid * weight
-            
-            return round(final_target, 2)
+            return ret
             
         except Exception as e:
-            print(f"⚠️ [Broker] 동적 스나이퍼 타점 계산 실패 ({index_ticker}): {e}")
-            return None
+            print(f"⚠️ [Broker] V3.1 스나이퍼 타점 반환 실패 ({index_ticker}): {e}")
+            # 통신 실패 시 방어용 1년 롤링 ATR 기반 기본값 (SOXL: -8.79%, TQQQ: -4.95%)
+            fallback_val = -8.79 if index_ticker == "SOXX" else -4.95
+            ret = TargetFloat(fallback_val)
+            ret.metric_val = 0.0
+            ret.weight = 1.0
+            ret.base_amp = fallback_val
+            ret.metric_name = "통신오류(기본값)"
+            ret.metric_base = 25.0 if index_ticker == "SOXX" else 20.0
+            ret.is_panic = False
+            ret.gap_pct = 0.0
+            return ret
 
     def get_day_high_low(self, ticker):
         try:
@@ -583,7 +638,7 @@ class KoreaInvestmentBroker:
 
         try:
             excg_cd = self._get_exchange_code(ticker, target_api="PRICE")
-            params = {"AUTH": "", "EXCD": excg_cd, "SYMB": ticker}
+            params = {"AUTH": "", "EXCD": excg_cd, "SYMB": ticker} 
             res = self._call_api("HHDFS76200200", "/uapi/overseas-price/v1/quotations/price", "GET", params=params)
             if res.get('rt_cd') == '0':
                 out = res.get('output', {})
@@ -592,3 +647,38 @@ class KoreaInvestmentBroker:
             print(f"❌ [한투 API] 고가/저가 우회 조회 실패: {e}")
             
         return 0.0, 0.0
+
+    def get_atr_data(self, ticker):
+        """
+        [V22.02] 실시간 ATR5 및 ATR14 (변동성 지표) 연산 모듈
+        """
+        try:
+            stock = yf.Ticker(ticker)
+            hist = stock.history(period="30d")
+            
+            if hist.empty or len(hist) < 15:
+                return 0.0, 0.0
+                
+            hist['Prev_Close'] = hist['Close'].shift(1)
+            hist['TR'] = hist.apply(lambda row: max(
+                row['High'] - row['Low'],
+                abs(row['High'] - row['Prev_Close']) if not pd.isna(row['Prev_Close']) else 0,
+                abs(row['Low'] - row['Prev_Close']) if not pd.isna(row['Prev_Close']) else 0
+            ), axis=1)
+            
+            hist['ATR5'] = hist['TR'].rolling(window=5).mean()
+            hist['ATR14'] = hist['TR'].rolling(window=14).mean()
+            
+            last_row = hist.iloc[-1]
+            last_close = float(last_row['Close'])
+            
+            if last_close > 0:
+                atr5_pct = (float(last_row['ATR5']) / last_close) * 100
+                atr14_pct = (float(last_row['ATR14']) / last_close) * 100
+                return round(atr5_pct, 1), round(atr14_pct, 1)
+                
+            return 0.0, 0.0
+            
+        except Exception as e:
+            print(f"⚠️ [Broker] 실시간 ATR 연산 실패 ({ticker}): {e}")
+            return 0.0, 0.0
