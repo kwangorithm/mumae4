@@ -314,10 +314,17 @@ async def scheduled_sniper_monitor(context):
                 prev_c = await asyncio.to_thread(broker.get_previous_close, t)
                 if curr_p <= 0: continue
                 
+                # 💡 [V22.12 패치] 당일 고가 기억 상실(Amnesia) 완벽 방어 (Self-Healing)
+                actual_day_high, _ = await asyncio.to_thread(broker.get_day_high_low, t)
+                
                 tracking_info = tracking_cache.setdefault(t, {
                     'is_tracking': False, 'lowest_price': float('inf'), 'day_high': 0.0, 'armed_price': 0.0, 'alerted': False,
                     'is_trailing': False, 'peak_price': 0.0, 'trailing_armed': False, 'trigger_price': 0.0
                 })
+                
+                # 봇 재시작 등으로 캐시가 증발했을 때, 실제 고가로 뇌 메모리 강제 복구
+                if actual_day_high > tracking_info['day_high']:
+                    tracking_info['day_high'] = actual_day_high
                 
                 # 💡 [하방 스나이퍼 구역] V17 시크릿 모드 전용
                 if version == "V17":
@@ -408,20 +415,38 @@ async def scheduled_sniper_monitor(context):
                                                 odno = res.get('odno', '')
                                                 
                                                 if res.get('rt_cd') == '0' and odno:
-                                                    await asyncio.sleep(2.0)
-                                                    unfilled = await asyncio.to_thread(broker.get_unfilled_orders_detail, t)
-                                                    my_order = next((o for o in unfilled if o.get('odno') == odno), None)
+                                                    order_found_in_unfilled = False
+                                                    ccld_qty = 0
                                                     
-                                                    if not my_order:
+                                                    for _ in range(4): # 2.0초 x 4 = 8초 대기 다중 교차 검증
+                                                        await asyncio.sleep(2.0)
+                                                        unfilled = await asyncio.to_thread(broker.get_unfilled_orders_detail, t)
+                                                        my_order = next((o for o in unfilled if o.get('odno') == odno), None)
+                                                        
+                                                        if my_order:
+                                                            order_found_in_unfilled = True
+                                                            ccld_qty = int(float(my_order.get('tot_ccld_qty', 0)))
+                                                            break
+                                                            
+                                                        execs = await asyncio.to_thread(broker.get_execution_history, t, today_est_str, today_est_str)
+                                                        my_execs = [ex for ex in execs if ex.get('odno') == odno]
+                                                        if my_execs:
+                                                            ccld_qty = sum(int(float(ex.get('ft_ccld_qty', '0'))) for ex in my_execs)
+                                                            if ccld_qty >= rem_qty:
+                                                                break
+                                                                
+                                                    if ccld_qty >= rem_qty:
                                                         rem_qty = 0
                                                         hunt_success = True
                                                         actual_buy_price = final_exec_price
                                                         break
                                                     else:
-                                                        ord_qty = int(float(my_order.get('ord_qty', 0)))
-                                                        tot_ccld_qty = int(float(my_order.get('tot_ccld_qty', 0)))
-                                                        rem_qty = ord_qty - tot_ccld_qty
-                                                        
+                                                        if order_found_in_unfilled and my_order:
+                                                            ord_qty = int(float(my_order.get('ord_qty', 0)))
+                                                            rem_qty = ord_qty - ccld_qty
+                                                        else:
+                                                            rem_qty -= ccld_qty
+                                                            
                                                         await asyncio.to_thread(broker.cancel_order, t, odno)
                                                         await asyncio.sleep(1.0)
                                                 
@@ -451,10 +476,10 @@ async def scheduled_sniper_monitor(context):
 
                                             now_ts = time.time()
                                             fail_history = app_data.setdefault('sniper_fail_ts', {})
-                                            if now_ts - fail_history.get(t, 0) > 600:
-                                                msg = f"🛡️ <b>[{t}] 능동형 스나이퍼 기습 실패 (10분 쿨타임 진입)</b>\n"
+                                            if now_ts - fail_history.get(t, 0) > 60:
+                                                msg = f"🛡️ <b>[{t}] 능동형 스나이퍼 기습 실패 (1분 쿨타임 진입)</b>\n"
                                                 msg += f"📉 반등 타점(${exec_price:.2f})에 3회 지정가 덫을 던졌으나 잔량이 남았습니다.\n"
-                                                msg += f"🦇 매수 스나이퍼는 10분 동안 숨을 죽이며, 취소했던 방어 매수(LOC) 주문만 호가창에 정밀 복구합니다."
+                                                msg += f"🦇 매수 스나이퍼는 1분 동안 숨을 죽이며, 취소했던 방어 매수(LOC) 주문만 호가창에 정밀 복구합니다."
                                                 await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode='HTML')
                                                 fail_history[t] = now_ts
                                             
@@ -496,20 +521,38 @@ async def scheduled_sniper_monitor(context):
                                 odno = res.get('odno', '')
                                 
                                 if res.get('rt_cd') == '0' and odno:
-                                    await asyncio.sleep(2.0)
-                                    unfilled = await asyncio.to_thread(broker.get_unfilled_orders_detail, t)
-                                    my_order = next((o for o in unfilled if o.get('odno') == odno), None)
+                                    order_found_in_unfilled = False
+                                    ccld_qty = 0
                                     
-                                    if not my_order:
+                                    for _ in range(4): # 2.0초 x 4 = 8초 대기 다중 교차 검증
+                                        await asyncio.sleep(2.0)
+                                        unfilled_check = await asyncio.to_thread(broker.get_unfilled_orders_detail, t)
+                                        my_order = next((o for o in unfilled_check if o.get('odno') == odno), None)
+                                        
+                                        if my_order:
+                                            order_found_in_unfilled = True
+                                            ccld_qty = int(float(my_order.get('tot_ccld_qty', 0)))
+                                            break
+                                            
+                                        execs = await asyncio.to_thread(broker.get_execution_history, t, today_est_str, today_est_str)
+                                        my_execs = [ex for ex in execs if ex.get('odno') == odno]
+                                        if my_execs:
+                                            ccld_qty = sum(int(float(ex.get('ft_ccld_qty', '0'))) for ex in my_execs)
+                                            if ccld_qty >= rem_qty:
+                                                break
+                                                
+                                    if ccld_qty >= rem_qty:
                                         rem_qty = 0
                                         hunt_success = True
                                         actual_sell_price = bid_price
                                         break
                                     else:
-                                        ord_qty = int(float(my_order.get('ord_qty', 0)))
-                                        tot_ccld_qty = int(float(my_order.get('tot_ccld_qty', 0)))
-                                        rem_qty = ord_qty - tot_ccld_qty
-                                        
+                                        if order_found_in_unfilled and my_order:
+                                            ord_qty = int(float(my_order.get('ord_qty', 0)))
+                                            rem_qty = ord_qty - ccld_qty
+                                        else:
+                                            rem_qty -= ccld_qty
+                                            
                                         await asyncio.to_thread(broker.cancel_order, t, odno)
                                         await asyncio.sleep(1.0)
                                         
@@ -527,10 +570,10 @@ async def scheduled_sniper_monitor(context):
                             
                         now_ts = time.time()
                         fail_history_j = app_data.setdefault('sniper_j_fail_ts', {})
-                        if now_ts - fail_history_j.get(t, 0) > 600:
+                        if now_ts - fail_history_j.get(t, 0) > 60:
                             msg = f"🛡️ <b>[{t}] 스나이퍼 잭팟 기습 실패 (방어선 복구)</b>\n"
                             msg += f"🎯 3회에 걸쳐 전량 익절을 시도했으나 체결되지 않았습니다.\n"
-                            msg += f"🦇 취소했던 원래의 매도(SELL) 주문을 다시 호가창에 정밀 장전합니다. (10분 쿨타임 적용)"
+                            msg += f"🦇 취소했던 원래의 매도(SELL) 주문을 다시 호가창에 정밀 장전합니다. (1분 쿨타임 적용)"
                             await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode='HTML')
                             fail_history_j[t] = now_ts
                         
@@ -623,20 +666,38 @@ async def scheduled_sniper_monitor(context):
                                 odno = res.get('odno', '')
                                 
                                 if res.get('rt_cd') == '0' and odno:
-                                    await asyncio.sleep(2.0)
-                                    unfilled_check = await asyncio.to_thread(broker.get_unfilled_orders_detail, t)
-                                    my_order = next((o for o in unfilled_check if o.get('odno') == odno), None)
+                                    order_found_in_unfilled = False
+                                    ccld_qty = 0
                                     
-                                    if not my_order:
+                                    for _ in range(4): # 2.0초 x 4 = 8초 대기 다중 교차 검증
+                                        await asyncio.sleep(2.0)
+                                        unfilled_check = await asyncio.to_thread(broker.get_unfilled_orders_detail, t)
+                                        my_order = next((o for o in unfilled_check if o.get('odno') == odno), None)
+                                        
+                                        if my_order:
+                                            order_found_in_unfilled = True
+                                            ccld_qty = int(float(my_order.get('tot_ccld_qty', 0)))
+                                            break
+                                            
+                                        execs = await asyncio.to_thread(broker.get_execution_history, t, today_est_str, today_est_str)
+                                        my_execs = [ex for ex in execs if ex.get('odno') == odno]
+                                        if my_execs:
+                                            ccld_qty = sum(int(float(ex.get('ft_ccld_qty', '0'))) for ex in my_execs)
+                                            if ccld_qty >= rem_qty:
+                                                break
+                                                
+                                    if ccld_qty >= rem_qty:
                                         rem_qty = 0
                                         hunt_success = True
                                         actual_sell_price = bid_price
                                         break
                                     else:
-                                        ord_qty = int(float(my_order.get('ord_qty', 0)))
-                                        tot_ccld_qty = int(float(my_order.get('tot_ccld_qty', 0)))
-                                        rem_qty = ord_qty - tot_ccld_qty
-                                        
+                                        if order_found_in_unfilled and my_order:
+                                            ord_qty = int(float(my_order.get('ord_qty', 0)))
+                                            rem_qty = ord_qty - ccld_qty
+                                        else:
+                                            rem_qty -= ccld_qty
+                                            
                                         await asyncio.to_thread(broker.cancel_order, t, odno)
                                         await asyncio.sleep(1.0)
                                         
@@ -663,10 +724,10 @@ async def scheduled_sniper_monitor(context):
                             
                         now_ts = time.time()
                         fail_history_q = app_data.setdefault('sniper_q_fail_ts', {})
-                        if now_ts - fail_history_q.get(t, 0) > 600:
+                        if now_ts - fail_history_q.get(t, 0) > 60:
                             msg = f"🛡️ <b>[{t}] 스나이퍼 쿼터 가로채기 실패 (방어선 복구)</b>\n"
                             msg += f"🎯 지정가 기습 매도를 시도했으나 잔량이 남았습니다.\n"
-                            msg += f"🦇 취소했던 쿼터 방어선(LOC 매도)을 호가창에 정밀 복구합니다. (10분 쿨타임 적용)"
+                            msg += f"🦇 취소했던 쿼터 방어선(LOC 매도)을 호가창에 정밀 복구합니다. (1분 쿨타임 적용)"
                             await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode='HTML')
                             fail_history_q[t] = now_ts
                         
