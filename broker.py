@@ -1,5 +1,5 @@
 # ==========================================================
-# [broker.py]
+# [broker.py] - Part 1
 # ⚠️ 이 주석 및 파일명 표기는 절대 지우지 마세요.
 # ==========================================================
 
@@ -14,7 +14,7 @@ import pytz
 import tempfile
 import pandas as pd   
 import numpy as np
-import volatility_engine as ve  # 💡 [V3.1 수술] 동적 변동성 엔진 연결 (이중 가중치)
+import volatility_engine as ve  
 
 class KoreaInvestmentBroker:
     def __init__(self, app_key, app_secret, cano, acnt_prdt_cd="01"):
@@ -207,10 +207,6 @@ class KoreaInvestmentBroker:
             return cash, None
 
     def get_current_5min_candle(self, ticker):
-        """
-        [V22.15] 이중 거래량(MA10/MA20) 골든크로스 엔진을 위해 순수 정규장 데이터만으로 거래량 평균 산출
-        💡 [V3.1 VWAP] 당일 정규장 누적 거래량 가중 평균가(VWAP) 연산 병합
-        """
         try:
             stock = yf.Ticker(ticker)
             df = stock.history(period="5d", interval="1m", prepost=True)
@@ -223,13 +219,11 @@ class KoreaInvestmentBroker:
                 
             df.index = df.index.tz_convert('America/New_York')
             
-            # 💡 [핵심 수술] 휩소 방어를 위해 거래량 평균(MA) 계산 시 프리/애프터마켓 노이즈를 완벽히 도려냄
             regular_market = df.between_time('09:30', '15:59')
             
             if regular_market.empty:
                 return None
                 
-            # 💡 [VWAP 연산 엔진] 당일 누적 거래대금 및 누적 거래량 산출
             typical_price = (regular_market['High'] + regular_market['Low'] + regular_market['Close']) / 3.0
             vol_price = typical_price * regular_market['Volume']
             
@@ -258,7 +252,6 @@ class KoreaInvestmentBroker:
             vol_ma10 = float(last_candle['Vol_MA10']) if not pd.isna(last_candle['Vol_MA10']) else float(last_candle['Volume'])
             vol_ma20 = float(last_candle['Vol_MA20']) if not pd.isna(last_candle['Vol_MA20']) else float(last_candle['Volume'])
             
-            # 💡 종가, 고가 등은 프리마켓을 포함한 전체 데이터(df)의 가장 마지막 1분봉 기준으로 최신화
             latest_1m = df.iloc[-1]
             
             return {
@@ -269,7 +262,7 @@ class KoreaInvestmentBroker:
                 'volume': float(last_candle['Volume']), 
                 'vol_ma10': vol_ma10,
                 'vol_ma20': vol_ma20,
-                'vwap': current_vwap  # 💡 추출된 VWAP 팩트 데이터를 딕셔너리에 안착
+                'vwap': current_vwap  
             }
         except Exception as e:
             print(f"⚠️ [Broker] 실시간 5분봉 캔들 조회 실패 ({ticker}): {e}")
@@ -294,7 +287,6 @@ class KoreaInvestmentBroker:
         except Exception as e:
             print(f"❌ [한투 API] 현재가 우회 조회 실패: {e}")
         return 0.0
-        
     def get_ask_price(self, ticker):
         try:
             excg_cd = self._get_exchange_code(ticker, target_api="PRICE")
@@ -436,6 +428,42 @@ class KoreaInvestmentBroker:
             if o.get('sll_buy_dvsn_cd') == sll_buy_cd and dvsn == target_ord_dvsn:
                 target_orders.append(o)
                 
+        for o in target_orders:
+            self.cancel_order(ticker, o.get('odno'))
+            time.sleep(0.3)
+            
+        return len(target_orders)
+
+    # ==========================================================
+    # 💡 [핵심 수술] 다중 필드 스캔을 통한 가격 기반 정밀 타겟팅 철거 로직
+    # ==========================================================
+    def cancel_orders_by_price(self, ticker, side, target_prices):
+        sll_buy_cd = '02' if side == "BUY" else '01'
+        orders = self.get_unfilled_orders_detail(ticker)
+        if not orders: return 0
+        
+        target_orders = []
+        for o in orders:
+            if o.get('sll_buy_dvsn_cd') == sll_buy_cd:
+                # KIS API 필드명 파편화(ft_ord_unpr3, ord_unpr, ovrs_ord_unpr) 완벽 대응
+                raw_p1 = o.get('ft_ord_unpr3', 0)
+                raw_p2 = o.get('ord_unpr', 0)
+                raw_p3 = o.get('ovrs_ord_unpr', 0)
+                
+                o_price = 0.0
+                for rp in [raw_p1, raw_p2, raw_p3]:
+                    try:
+                        val = float(rp)
+                        if val > 0:
+                            o_price = val
+                            break
+                    except: pass
+
+                for tp in target_prices:
+                    if o_price > 0 and abs(o_price - tp) < 0.005: 
+                        target_orders.append(o)
+                        break
+                        
         for o in target_orders:
             self.cancel_order(ticker, o.get('odno'))
             time.sleep(0.3)
@@ -604,17 +632,11 @@ class KoreaInvestmentBroker:
         return 0.0, ""
 
     def get_dynamic_sniper_target(self, index_ticker):
-        """
-        [V3.1+] 자율주행 동적 스나이퍼 타점 산출 (기초지수 1년 ATR 앵커 + 공포 가중치)
-        수동 가중치 및 고정 상수를 전면 폐기하고, volatility_engine을 호출하여 
-        기초지수 1년 ATR 기반의 3배수 동적 앵커와 실시간 공포 지수(VXN/HV) 기반 타격선을 반환합니다.
-        """
         try:
             class TargetFloat(float):
                 pass
             
             if index_ticker == "SOXX":
-                # SOXL (기초지수 SOXX)
                 hv_val, weight, target_drop, base_amp = ve.get_soxl_target_drop_full()
                 ret = TargetFloat(target_drop)
                 ret.metric_val = hv_val
@@ -623,7 +645,6 @@ class KoreaInvestmentBroker:
                 ret.metric_name = "SOXX HV"
                 ret.metric_base = round(hv_val / weight, 2) if weight > 0 else 25.0
             else:
-                # TQQQ (기초지수 QQQ, 공포지수 VXN)
                 vxn_val, weight, target_drop, base_amp = ve.get_tqqq_target_drop_full()
                 ret = TargetFloat(target_drop)
                 ret.metric_val = vxn_val
@@ -639,7 +660,6 @@ class KoreaInvestmentBroker:
             
         except Exception as e:
             print(f"⚠️ [Broker] V3.1 스나이퍼 타점 반환 실패 ({index_ticker}): {e}")
-            # 통신 실패 시 방어용 1년 롤링 ATR 기반 기본값 (SOXL: -8.79%, TQQQ: -4.95%)
             fallback_val = -8.79 if index_ticker == "SOXX" else -4.95
             ret = TargetFloat(fallback_val)
             ret.metric_val = 0.0
@@ -677,9 +697,6 @@ class KoreaInvestmentBroker:
         return 0.0, 0.0
 
     def get_atr_data(self, ticker):
-        """
-        [V22.02] 실시간 ATR5 및 ATR14 (변동성 지표) 연산 모듈
-        """
         try:
             stock = yf.Ticker(ticker)
             hist = stock.history(period="30d")
