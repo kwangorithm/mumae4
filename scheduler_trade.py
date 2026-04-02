@@ -89,9 +89,9 @@ async def scheduled_sniper_monitor(context):
                 if version == "V_VWAP" and now_est.hour == 15 and now_est.minute >= 29:
                     continue
                 
-                is_upward_sniper_on = cfg.get_upward_sniper_mode()
+                # 💡 [핵심 수술] 인자 누락 버그 픽스 완료
+                is_upward_sniper_on = cfg.get_upward_sniper_mode(t)
                 
-                # 💡 [수술 완료] VWAP 모드에서도 12% 잭팟과 상방 스나이퍼가 정상 작동하도록 차단벽 철거
                 if version != "V17" and not is_upward_sniper_on:
                     continue
                 
@@ -598,6 +598,11 @@ async def scheduled_sniper_monitor(context):
             app_data['sniper_timeout_ts'] = now_ts
     except Exception as e:
         logging.error(f"🚨 스나이퍼 모니터 에러: {e}")
+# ==========================================================
+# [scheduler_trade.py] - Part 2
+# ⚠️ 이 주석 및 파일명 표기는 절대 지우지 마세요.
+# ==========================================================
+
 async def scheduled_vwap_trade(context):
     if not is_market_open(): return
     
