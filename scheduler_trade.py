@@ -1,6 +1,6 @@
 # ==========================================================
-# [scheduler_trade.py] - Part 1
-# ⚠️ 이 주석 및 파일명 표기는 절대 지우지 마세요.
+# [scheduler_trade.py]
+# ⚠️ VWAP Lock-in 핑퐁 버그 픽스 패치 완료 버전
 # ==========================================================
 import os
 import logging
@@ -168,7 +168,7 @@ async def scheduled_sniper_monitor(context):
                                     tracking_info['lowest_price'] = c_low
                                     
                                     if not tracking_info['alerted']:
-                                        msg = f"🎯 <b>[{t}] 하방 매 매수 스나이퍼 안전장치 해제 (Armed)!</b>\n"
+                                        msg = f"🎯 <b>[{t}] 하방 매수 스나이퍼 안전장치 해제 (Armed)!</b>\n"
                                         msg += f"📈 <b>장중 고점: ${tracking_info['day_high']:.2f}</b>\n"
                                         msg += f"📉 <b>에너지 소진: -{abs(sniper_pct):.2f}% (방어선 ${tracking_info['armed_price']:.2f} 돌파)</b>\n"
                                         msg += f"👀 진짜 바닥을 다질 때까지 발목을 노리며 추적을 시작합니다."
@@ -307,7 +307,7 @@ async def scheduled_sniper_monitor(context):
                                             now_ts = time.time()
                                             fail_history = app_data.setdefault('sniper_fail_ts', {})
                                             if now_ts - fail_history.get(f"{t}_vwap", 0) > 300:
-                                                msg = f"🛡️ <b>[{t}] 하방 스나이퍼 매수 취소 (VWAP 필터 가 가동)</b>\n"
+                                                msg = f"🛡️ <b>[{t}] 하방 스나이퍼 매수 취소 (VWAP 필터 가동)</b>\n"
                                                 msg += f"반등 조건은 충족했으나 현재가(${c_close:.2f})가 당일 평균가(${c_vwap:.2f})를 넘어선 비싼 가격입니다. 가짜 반등(데드캣 바운스)으로 판별하여 사격을 취소합니다."
                                                 await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode='HTML')
                                                 fail_history[f"{t}_vwap"] = now_ts
@@ -598,10 +598,6 @@ async def scheduled_sniper_monitor(context):
             app_data['sniper_timeout_ts'] = now_ts
     except Exception as e:
         logging.error(f"🚨 스나이퍼 모니터 에러: {e}")
-# ==========================================================
-# [scheduler_trade.py] - Part 2
-# ⚠️ 이 주석 및 파일명 표기는 절대 지우지 마세요.
-# ==========================================================
 
 async def scheduled_vwap_trade(context):
     if not is_market_open(): return
@@ -721,7 +717,7 @@ async def scheduled_vwap_trade(context):
                 cfg.set_p_trade_data(p_trade_data)
 
             # ==========================================================
-            # 기존 무한매수 VWAP 로직 (전면 초토화 및 잭팟만 재장전)
+            # 기존 무한매수 VWAP 로직
             # ==========================================================
             for t in cfg.get_active_tickers():
                 if cfg.get_version(t) != "V_VWAP": 
@@ -742,19 +738,42 @@ async def scheduled_vwap_trade(context):
                     market_type="REG", available_cash=allocated_cash[t], is_simulation=True
                 )
                 
-                target_star_buy_budget = 0.0
-                target_avg_buy_budget = 0.0
-                target_sell_qty = 0
-                star_price = plan.get('star_price', 0.0)
+                # ==========================================================
+                # 💡 [핵심 버그 수정] VWAP 타격 기준가 및 예산을 최초 1회 락인(Lock-in)하여 핑퐁 엇갈림 방지
+                # ==========================================================
+                if f"{t}_plan_locked" not in vwap_cache:
+                    target_star_buy_budget = 0.0
+                    target_avg_buy_budget = 0.0
+                    target_sell_qty = 0
+                    jackpot_orders = []
+                    
+                    for o in plan.get('core_orders', []):
+                        if o['side'] == 'BUY':
+                            if '별값' in o['desc'] or '수혈' in o['desc'] or '잔금' in o['desc']:
+                                target_star_buy_budget += (o['qty'] * o['price'])
+                            else:
+                                target_avg_buy_budget += (o['qty'] * o['price'])
+                        elif o['side'] == 'SELL':
+                            if o['type'] == 'LOC': 
+                                target_sell_qty += o['qty']
+                            elif o['type'] == 'LIMIT':
+                                jackpot_orders.append(o)
+                                
+                    # 15:30에 계산된 최초 결과값을 캐시에 영구 저장 (30분간 유지)
+                    vwap_cache[f"{t}_star_price"] = plan.get('star_price', 0.0)
+                    vwap_cache[f"{t}_actual_avg"] = actual_avg
+                    vwap_cache[f"{t}_target_star_buy_budget"] = target_star_buy_budget
+                    vwap_cache[f"{t}_target_avg_buy_budget"] = target_avg_buy_budget
+                    vwap_cache[f"{t}_target_sell_qty"] = target_sell_qty
+                    vwap_cache[f"{t}_jackpot_orders"] = jackpot_orders
+                    vwap_cache[f"{t}_plan_locked"] = True
                 
-                for o in plan.get('core_orders', []):
-                    if o['side'] == 'BUY':
-                        if '별값' in o['desc'] or '수혈' in o['desc'] or '잔금' in o['desc']:
-                            target_star_buy_budget += (o['qty'] * o['price'])
-                        else:
-                            target_avg_buy_budget += (o['qty'] * o['price'])
-                    elif o['side'] == 'SELL' and o['type'] == 'LOC': 
-                        target_sell_qty += o['qty']
+                # 💡 매 1분 루프마다 T값이 흔들리지 않도록 캐싱된 고정 스냅샷 값 사용
+                star_price = vwap_cache[f"{t}_star_price"]
+                actual_avg = vwap_cache[f"{t}_actual_avg"]
+                target_star_buy_budget = vwap_cache[f"{t}_target_star_buy_budget"]
+                target_avg_buy_budget = vwap_cache[f"{t}_target_avg_buy_budget"]
+                target_sell_qty = vwap_cache[f"{t}_target_sell_qty"]
                 
                 # ==========================================================
                 # 💡 [전면 초토화 로직] 15:30 EST 정각: 줍줍 포함 호가창 전면 Nuke
@@ -772,11 +791,10 @@ async def scheduled_vwap_trade(context):
                     await asyncio.to_thread(broker.cancel_all_orders_safe, t, "BUY")
                     await asyncio.to_thread(broker.cancel_all_orders_safe, t, "SELL")
                     
-                    # 2. 💡 12% 잭팟(지정가 매도)만 정밀 재장전 (줍줍은 복구하지 않음)
-                    for o in plan.get('core_orders', []):
-                        if o['side'] == 'SELL' and o['type'] == 'LIMIT':
-                            broker.send_order(t, o['side'], o['qty'], o['price'], o['type'])
-                            await asyncio.sleep(0.2)
+                    # 2. 💡 12% 잭팟(지정가 매도)만 정밀 재장전 (재계산 방지 캐시 데이터 사용)
+                    for o in vwap_cache.get(f"{t}_jackpot_orders", []):
+                        broker.send_order(t, o['side'], o['qty'], o['price'], o['type'])
+                        await asyncio.sleep(0.2)
                             
                     vwap_cache[f"{t}_cancelled"] = True
                     await asyncio.sleep(5.0) 
