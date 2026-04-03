@@ -288,7 +288,8 @@ class TelegramController:
         
         await update.message.reply_text(final_msg, reply_markup=markup, parse_mode='HTML')
 # ==========================================================
-# [telegram_bot.py] - Part 2 (이어서 작성)
+# [telegram_bot.py] - Part 2
+# ⚠️ 이 주석 및 파일명 표기는 절대 지우지 마세요.
 # ==========================================================
 
     async def cmd_record(self, update, context):
@@ -561,7 +562,6 @@ class TelegramController:
             await update.message.reply_text(msg, parse_mode='HTML')
             return
 
-        # 💡 [핵심 수술] 텍스트 다이어트 (권장 삭제) 및 종목별 독립 제어 버튼 렌더링
         report = "📊 <b>[ 자율주행 변동성 마스터 지표 상세 분석 ]</b>\n\n"
         
         report += "<b>[ 🧭 지수 범위 범례 (ON/OFF 권장) ]</b>\n"
@@ -600,7 +600,6 @@ class TelegramController:
 
         report += "⚠️ <b>[매도 엔진 충돌 경고]</b> 스나이퍼 수동 가동 시 VWAP 매도 엔진과 충돌합니다. 스나이퍼가 명중하여 KIS 원장에 체결 이력이 기록될 경우, 다중 매도 방지 락온 로직에 의해 당일 VWAP 매도 스케줄러는 즉각 가동 중단(Lock-down) 처리됩니다.\n\n"
         
-        # 💡 [핵심 수술] 글로벌 스위치 파기 및 종목별 독립 제어 버튼 생성
         report += "🎯 <b>[ 수동 상방 스나이퍼 독립 제어 ]</b>\n"
         keyboard = []
         for t in active_tickers:
@@ -760,7 +759,37 @@ class TelegramController:
                     qty, avg, invested, sold = self.cfg.calculate_holdings(target['ticker'], target['trades'])
                     msg, markup = self.view.create_ledger_dashboard(target['ticker'], qty, avg, invested, sold, target['trades'], 0, 0, is_history=True)
                     await query.edit_message_text(msg, reply_markup=markup, parse_mode='HTML')
-            elif sub == "LIST": await self.cmd_history(update, context)
+            elif sub == "LIST": 
+                await self.cmd_history(update, context)
+            # ==========================================================
+            # 💡 [핵심 수술] 프리미엄 졸업 카드 수동 발급 트리거
+            # ==========================================================
+            elif sub == "IMG":
+                ticker = data[2]
+                hist_list = [h for h in self.cfg.get_history() if h['ticker'] == ticker]
+                
+                if not hist_list:
+                    await context.bot.send_message(update.effective_chat.id, f"📭 <b>[{ticker}]</b> 발급 가능한 졸업 기록이 존재하지 않습니다.", parse_mode='HTML')
+                    return
+                
+                # 가장 최근 졸업 이력 추출
+                latest_hist = sorted(hist_list, key=lambda x: x.get('end_date', ''), reverse=True)[0]
+                
+                try:
+                    img_path = self.view.create_profit_image(
+                        ticker=latest_hist['ticker'],
+                        profit=latest_hist['profit'],
+                        yield_pct=latest_hist['yield'],
+                        invested=latest_hist['invested'],
+                        revenue=latest_hist['revenue'],
+                        end_date=latest_hist['end_date']
+                    )
+                    if os.path.exists(img_path):
+                        with open(img_path, 'rb') as photo:
+                            await context.bot.send_photo(chat_id=update.effective_chat.id, photo=photo)
+                except Exception as e:
+                    logging.error(f"📸 👑 졸업 이미지 생성/발송 실패: {e}")
+                    await context.bot.send_message(update.effective_chat.id, f"❌ 이미지 렌더링 모듈 장애 발생.", parse_mode='HTML')
             
         elif action == "EXEC":
             t = sub
@@ -833,10 +862,9 @@ class TelegramController:
             self.cfg.set_active_tickers([sub] if sub != "ALL" else ["SOXL", "TQQQ"])
             await query.edit_message_text(f"✅ 운용 종목 변경: {sub}")
             
-        # 💡 [핵심 수술] 콜백 라우터 개조: 종목별 독립 제어 스위칭 신호 처리
         elif action == "MODE":
             mode_val = sub
-            ticker = data[2] if len(data) > 2 else "SOXL" # 호환성 방어
+            ticker = data[2] if len(data) > 2 else "SOXL"
             self.cfg.set_upward_sniper_mode(ticker, mode_val == "ON")
             await query.edit_message_text(f"✅ <b>[{ticker}]</b> 상방 스나이퍼 모드 변경 완료: {'🎯 ON (가동중)' if mode_val == 'ON' else '⚪ OFF (대기중)'}", parse_mode='HTML')
             

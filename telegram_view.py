@@ -5,12 +5,44 @@
 import os
 import math
 import json
+import logging
 from PIL import Image, ImageDraw, ImageFont
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 class TelegramView:
     def __init__(self):
-        pass
+        # 💡 [핵심 수술] 리눅스 서버(Ubuntu 등) 폰트 파일 시스템 전방위 추적 경로 확장
+        self.bold_font_paths = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+            "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+            "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+            "arialbd.ttf"
+        ]
+        self.reg_font_paths = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+            "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+            "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+            "arial.ttf"
+        ]
+
+    def _load_best_font(self, font_list, size):
+        """ 🛡️ 시스템 환경에 맞는 최적의 폰트를 끈질기게 추적하여 반환하는 렌더링 방어막 """
+        for path in font_list:
+            try:
+                # 폰트 파일이 실제로 존재하는지 1차 팩트 체크
+                if os.path.exists(path):
+                    return ImageFont.truetype(path, size)
+            except:
+                continue
+        # 2차: OS 기본 폰트 강제 탐색
+        try:
+            return ImageFont.truetype("sans-serif", size)
+        except:
+            return ImageFont.load_default()
 
     def get_start_message(self, target_hour, season_icon, latest_version):
         init_time = f"{target_hour:02d}:00"
@@ -39,9 +71,6 @@ class TelegramView:
             "<i>┗ 🚨 수동 닻 올리기: 예산 부족으로 리버스 진입 후 외화RP매도 등 예수금을 추가 입금하셨다면, 이 메뉴에서 반드시 '리버스 강제 해제'를 눌러 닻을 올려주세요!</i>"
         )
 
-    # ==========================================================
-    # 💡 [핵심 수술] P매매 (VWAP) 시크릿 모드 전용 UI 파이프라인
-    # ==========================================================
     def get_p_trade_unlocked_message(self, ticker, seed, multiplier):
         return (
             f"🟢 <b>[ P-VWAP Engine Unlocked ]</b>\n"
@@ -77,22 +106,16 @@ class TelegramView:
         msg += f"\n상태: 총 {len(parsed_list)}개 슬롯, 15:30 ~ 15:59 U-Curve 타임 슬라이싱 대기열 장전."
         return msg
 
-    # ==========================================================
-    # 기존 UI 렌더링 파이프라인
-    # ==========================================================
     def get_reset_menu(self, active_tickers):
         msg = (
             "🛠️ <b>[ 시스템 안전 통제실 ]</b>\n"
             "⚠️ 주의: 강제 초기화할 항목을 선택하세요."
         )
         keyboard = []
-        
         for t in active_tickers:
             keyboard.append([InlineKeyboardButton(f"🔓 [{t}] 매매 잠금 해제", callback_data=f"RESET:LOCK:{t}")])
-            
         for t in active_tickers:
             keyboard.append([InlineKeyboardButton(f"🚨 [{t}] 리버스/장부 초기화", callback_data=f"RESET:REV:{t}")])
-            
         keyboard.append([InlineKeyboardButton("❌ 취소 및 닫기", callback_data="RESET:CANCEL")])
         return msg, InlineKeyboardMarkup(keyboard)
 
@@ -107,6 +130,10 @@ class TelegramView:
             [InlineKeyboardButton("❌ 아니오, 유지합니다", callback_data="RESET:MENU")]
         ]
         return msg, InlineKeyboardMarkup(keyboard)
+# ==========================================================
+# [telegram_view.py] - Part 2
+# ⚠️ 이 주석 및 파일명 표기는 절대 지우지 마세요.
+# ==========================================================
 
     def get_version_message(self, history_data, page_index=None):
         if not history_data:
@@ -332,10 +359,7 @@ class TelegramView:
             elif v_mode == "V_VWAP":
                 body_msg += f"⏱️ <b>페일세이프(Fail-Safe):</b> 정규장 17:05 KST 무매 덫 선제 장전\n"
                 body_msg += f"⏱️ <b>VWAP 스케줄:</b> 15:30 EST 기존 LOC 철거 ➔ 지정가 분할 타격\n"
-# ==========================================================
-# [telegram_view.py] - Part 2 (이어서 작성)
-# ==========================================================
-
+            
             body_msg += f"📋 <b>[주문 계획 - {proc_status}]</b>\n"
             
             plan_orders = t_info.get('plan', {}).get('orders', [])
@@ -373,9 +397,6 @@ class TelegramView:
 
         final_msg = header_msg + body_msg
 
-        # ==========================================================
-        # 💡 [핵심 수술] P매매 (VWAP) 독립 대기열 렌더링 파이프라인
-        # ==========================================================
         if p_trade_data:
             has_p_orders = False
             p_msg = "----------------------------\n"
@@ -394,9 +415,6 @@ class TelegramView:
                 p_msg += "<i>※ P-VWAP 주문은 15:30 EST부터 1분 단위로 분할 타격되며 미체결분은 장 마감 시 자동 소멸됩니다. (봇의 무매 예산 연동 없음)</i>\n\n"
                 final_msg += p_msg
 
-        # ==========================================================
-        # 💡 [핵심 수술] 1-Tier 자율주행 지표 1줄 요약 조립 및 하단 강제 노출
-        # ==========================================================
         vol_summaries = []
         for t_info in ticker_data:
             if 'vol_weight' in t_info and 'vol_status' in t_info:
@@ -447,13 +465,11 @@ class TelegramView:
                     m_name = target_obj.metric_name
                     base_amp = abs(target_obj.base_amp)
                     
-                    # 💡 [핵심 수술] 가중치(비율) 연산 완전 소각 및 절대 수치(m_val) 기반 UI 표출
                     msg += f"📊 <b>실시간 동적 변동성 (V3.2 마스터 스위치):</b>\n"
                     msg += f"▫️ ATR5 ({atr5:.1f}%) / ATR14 ({atr14:.1f}%)\n"
                     msg += f"▫️ {m_name} (당일 절대지수): {m_val:.2f}\n"
                     msg += f"▫️ 고정 타격선(1년 ATR): -{base_amp:.2f}%\n"
                     
-                    # 💡 절대 수치(VXN 등) 기준 임계점 20.0을 상방/하방 분기점으로 적용
                     if m_val <= 20.0:
                         msg += f"▫️ 자율제어: 🔫하방[ON] / 🛡️상방[OFF]\n\n"
                     else:
@@ -548,15 +564,24 @@ class TelegramView:
             keyboard.append([InlineKeyboardButton(f"🔄 {other} 장부 조회", callback_data=f"REC:VIEW:{other}")])
             keyboard.append([InlineKeyboardButton("🔙 장부 대시보드 업데이트", callback_data=f"REC:SYNC:{ticker}")])
         else:
+            keyboard.append([InlineKeyboardButton("🖼️ 프리미엄 졸업 카드 발급", callback_data=f"HIST:IMG:{ticker}")])
             keyboard.append([InlineKeyboardButton("🔙 역사 목록으로 돌아가기", callback_data="HIST:LIST")])
 
         return msg, InlineKeyboardMarkup(keyboard)
+# ==========================================================
+# [telegram_view.py] - Part 3
+# ⚠️ 이 주석 및 파일명 표기는 절대 지우지 마세요.
+# ==========================================================
 
     def create_profit_image(self, ticker, profit, yield_pct, invested, revenue, end_date):
         W, H = 600, 920 
         IMG_H = 430 
-        img = Image.new('RGB', (W, H), color='#121212')
+        
+        # 💡 [디자인 수술] 상하단 분리 및 하단 모던 플랫 테마 배경 적용
+        img = Image.new('RGB', (W, H), color='#1E222D')
         draw = ImageDraw.Draw(img)
+        
+        # 상단 배경 이미지 (텍스트 영역과 100% 격리)
         try:
             if os.path.exists("background.png"):
                 bg = Image.open("background.png").convert("RGB")
@@ -568,33 +593,48 @@ class TelegramView:
                     new_h = int(W / bg_ratio)
                     bg = bg.resize((W, new_h), Image.Resampling.LANCZOS).crop((0, (new_h - IMG_H) // 2, W, (new_h + IMG_H) // 2))
                 img.paste(bg, (0, 0))
-        except: draw.rectangle([0, 0, W, IMG_H], fill="#252525")
+            else:
+                draw.rectangle([0, 0, W, IMG_H], fill="#111217")
+        except: 
+            draw.rectangle([0, 0, W, IMG_H], fill="#111217")
 
-        try:
-            f_p = ImageFont.truetype("arial.ttf", 85)
-            f_y = ImageFont.truetype("arial.ttf", 45)
-            f_b = ImageFont.truetype("arial.ttf", 35)
-        except: f_p = f_y = f_b = ImageFont.load_default()
+        # 💡 [가독성 수술] 픽셀 오버플로우 방지를 위한 폰트 스케일 다운 (정밀 교정)
+        f_title = self._load_best_font(self.bold_font_paths, 65)
+        f_p = self._load_best_font(self.bold_font_paths, 85)
+        f_y = self._load_best_font(self.reg_font_paths, 40)
+        f_b_val = self._load_best_font(self.bold_font_paths, 32)
+        f_b_lbl = self._load_best_font(self.reg_font_paths, 22)
 
-        y = IMG_H + 50
-        draw.text((W/2, y), ticker, font=f_b, fill="white", anchor="mm")
-        y += 100
-        color = "#FF453A" if profit < 0 else "#30D158"
+        # 상단 타이틀 플랫 박스
+        y_title = IMG_H + 60
+        draw.rectangle([W/2 - 140, y_title - 45, W/2 + 140, y_title + 45], fill="#2A2F3D")
+        draw.text((W/2, y_title), f"{ticker}", font=f_title, fill="white", anchor="mm")
+        
+        # K-퀀트 배색 적용 및 수익 데이터 렌더링
+        color = "#007AFF" if profit < 0 else "#FF3B30"
         sign = "-" if profit < 0 else "+"
-        draw.text((W/2, y), f"{sign}${abs(profit):,.2f}", font=f_p, fill=color, anchor="mm")
-        y += 75
-        draw.text((W/2, y), f"{sign}{abs(yield_pct):,.2f}", font=f_y, fill=color, anchor="mm")
         
-        y += 110
-        draw.rectangle([40, y, 290, y + 110], fill="#1C1C1E")
-        draw.text((165, y + 35), f"${invested:,.2f}", font=f_b, fill="white", anchor="mm")
-        draw.text((165, y + 75), "Total Invested", font=f_b, fill="#8E8E93", anchor="mm")
+        y_profit = y_title + 105
+        draw.text((W/2, y_profit), f"{sign}${abs(profit):,.2f}", font=f_p, fill=color, anchor="mm")
         
-        draw.rectangle([310, y, 560, y + 110], fill="#1C1C1E")
-        draw.text((435, y + 35), f"${revenue:,.2f}", font=f_b, fill="white", anchor="mm")
-        draw.text((435, y + 75), "Total Revenue", font=f_b, fill="#8E8E93", anchor="mm")
+        y_yield = y_profit + 75
+        draw.text((W/2, y_yield), f"YIELD {sign}{abs(yield_pct):,.2f}%", font=f_y, fill=color, anchor="mm")
         
-        draw.text((W/2, H - 40), f"Graduation Date: {end_date}", font=f_b, fill="#636366", anchor="mm")
+        # 💡 하단 데이터 독립 박스 병렬 렌더링 (폰트 축소에 맞춘 패딩 최적화)
+        y_box = y_yield + 60
+        
+        # 좌측 투자금 박스
+        draw.rectangle([40, y_box, 290, y_box + 100], fill="#2A2F3D")
+        draw.text((165, y_box + 35), f"${invested:,.2f}", font=f_b_val, fill="white", anchor="mm")
+        draw.text((165, y_box + 75), "TOTAL INVESTED", font=f_b_lbl, fill="#8E8E93", anchor="mm")
+        
+        # 우측 수익금 박스
+        draw.rectangle([310, y_box, 560, y_box + 100], fill="#2A2F3D")
+        draw.text((435, y_box + 35), f"${revenue:,.2f}", font=f_b_val, fill="white", anchor="mm")
+        draw.text((435, y_box + 75), "TOTAL REVENUE", font=f_b_lbl, fill="#8E8E93", anchor="mm")
+        
+        # 하단 날짜
+        draw.text((W/2, H - 35), f"{end_date}", font=f_b_lbl, fill="#636366", anchor="mm")
         
         fname = f"data/profit_{ticker}.png"
         img.save(fname)
