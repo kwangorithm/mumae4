@@ -1,9 +1,10 @@
 # ==========================================================
-# [scheduler_trade.py]
+# [scheduler_trade.py] (1부 / 2부)
 # ⚠️ 수술 내역: 
-# 1. V-REV 잭팟 잔량 강제 청산 (Sweep Finisher) 탑재 완료
-# 2. V_VWAP 0주 새출발 실종 버그 패치 (평단가 15% 할증)
-# 3. 들여쓰기(Indentation) 완벽 교정
+# 1. V-REV 잭팟 잔량 강제 청산 (Sweep Finisher) 유지
+# 2. V_VWAP 0주 새출발 실종 버그 패치 (평단가 15% 할증) 유지
+# 3. 🚨 [V_VWAP 데드존 전면 철거] 평단가(actual_avg) 초과 시 매수 동결 방어막 제거. 
+#    익절 목표가(star_price) 도달 전까지 전량 매수(불타기) 강제 집행.
 # ==========================================================
 import os
 import logging
@@ -659,12 +660,13 @@ async def scheduled_vwap_trade(context):
                     rem_star_budget = max(0.0, target_star_buy_budget - vwap_cache.get(f"{t}_star_buy_executed", 0.0))
                     rem_avg_budget = max(0.0, target_avg_buy_budget - vwap_cache.get(f"{t}_avg_buy_executed", 0.0))
                     
+                    # 💡 [데드존 철거 수술] actual_avg(평단가) 상한선을 star_price(목표가)로 확장
                     buy_qty = 0
                     if curr_p <= star_price and rem_star_budget > 0:
                         p1 = vwap_strategy.get_vwap_plan(t, curr_p, rem_star_budget, side="BUY", vwap_status=vwap_status)
                         if p1['orders']: buy_qty += p1['orders'][0]['qty']
                         
-                    if curr_p <= actual_avg and rem_avg_budget > 0:
+                    if curr_p <= star_price and rem_avg_budget > 0: # 🚨 actual_avg -> star_price 로 상한선 해제
                         p2 = vwap_strategy.get_vwap_plan(t, curr_p, rem_avg_budget, side="BUY", vwap_status=vwap_status)
                         if p2['orders']: buy_qty += p2['orders'][0]['qty']
                         
@@ -676,7 +678,8 @@ async def scheduled_vwap_trade(context):
                         if exec_price <= star_price and rem_star_budget > 0:
                             p1 = vwap_strategy.get_vwap_plan(t, exec_price, rem_star_budget, side="BUY", vwap_status=vwap_status)
                             if p1['orders']: valid_buy_qty += p1['orders'][0]['qty']
-                        if exec_price <= actual_avg and rem_avg_budget > 0:
+                            
+                        if exec_price <= star_price and rem_avg_budget > 0: # 🚨 actual_avg -> star_price 로 상한선 해제
                             p2 = vwap_strategy.get_vwap_plan(t, exec_price, rem_avg_budget, side="BUY", vwap_status=vwap_status)
                             if p2['orders']: valid_buy_qty += p2['orders'][0]['qty']
                             
@@ -708,7 +711,7 @@ async def scheduled_vwap_trade(context):
                                 if ccld_qty > 0:
                                     spent = ccld_qty * exec_price
                                     s_active = rem_star_budget if exec_price <= star_price else 0.0
-                                    a_active = rem_avg_budget if exec_price <= actual_avg else 0.0
+                                    a_active = rem_avg_budget if exec_price <= star_price else 0.0 # 🚨 actual_avg -> star_price
                                     tot_act = s_active + a_active
                                     if tot_act > 0:
                                         vwap_cache[f"{t}_star_buy_executed"] = vwap_cache.get(f"{t}_star_buy_executed", 0.0) + spent * (s_active / tot_act)
@@ -759,6 +762,9 @@ async def scheduled_vwap_trade(context):
         await asyncio.wait_for(_do_vwap(), timeout=45.0)
     except Exception as e:
         logging.error(f"🚨 VWAP 스케줄러 에러: {e}")
+# ==========================================================
+# [scheduler_trade.py] (2부 / 2부)
+# ==========================================================
 
 # ==========================================================
 # 4. 🩸 긴급 수혈 스케줄러 (MOC)
