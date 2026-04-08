@@ -8,6 +8,7 @@
 # 4. 🚨 [V-REV 데드존 구축] 목표가(target_price) 미만 시 매도 보류 및 잔량 누적(Carry-over) 적용
 # 5. 🚨 [V-REV 1층 스윕 피니셔 탑재] 장 마감 2분 전 1층 타점(1.006) 이상일 경우 1층 잔여 물량 전량 청산
 # 6. 🚨 [애프터마켓 3% 로터리 덫 신설] KST 05:05 (16:05 EST) 잔여 물량 전량 +3% 지정가(After-market) 전송
+# 💡 [V24.09 패치] 외부 데이터 통신 결측치(None) Safe Casting 전방위 적용 완료
 # ==========================================================
 import os
 import logging
@@ -111,14 +112,15 @@ async def scheduled_sniper_monitor(context):
                 if lock_buy and lock_sell:
                     continue
                 
-                h = holdings.get(t, {'qty': 0, 'avg': 0})
-                
+                # 💡 [핵심 수술] 보유 수량 및 평단가 강제 안전 형변환
+                h = holdings.get(t) or {}
                 qty = int(float(h.get('qty') or 0))
                 avg_price = float(h.get('avg') or 0.0)
                 if qty == 0: continue
                 
-                curr_p = await asyncio.to_thread(broker.get_current_price, t)
-                prev_c = await asyncio.to_thread(broker.get_previous_close, t)
+                # 💡 [핵심 수술] API 데이터 Safe Casting
+                curr_p = float(await asyncio.to_thread(broker.get_current_price, t) or 0.0)
+                prev_c = float(await asyncio.to_thread(broker.get_previous_close, t) or 0.0)
                 if curr_p <= 0: continue
                 
                 try:
@@ -128,6 +130,7 @@ async def scheduled_sniper_monitor(context):
                     vwap_status = {"vwap_price": 0.0, "is_strong_up": False, "is_strong_down": False}
 
                 actual_day_high, _ = await asyncio.to_thread(broker.get_day_high_low, t)
+                actual_day_high = float(actual_day_high or 0.0)
                 
                 tracking_info = tracking_cache.setdefault(t, {
                     'is_tracking': False, 'lowest_price': float('inf'), 'day_high': 0.0, 'armed_price': 0.0, 'alerted': False,
@@ -199,9 +202,9 @@ async def scheduled_sniper_monitor(context):
                                             if vwap_status.get('is_strong_down', False): continue
                                                 
                                             if cfg.get_secret_mode():
-                                                ma_5day = await asyncio.to_thread(broker.get_5day_ma, t)
+                                                ma_5day = float(await asyncio.to_thread(broker.get_5day_ma, t) or 0.0)
                                                 temp_plan = strategy.get_plan(t, curr_p, avg_price, qty, prev_c, ma_5day=ma_5day, market_type="REG", available_cash=allocated_cash[t], is_simulation=True, vwap_status=vwap_status)
-                                                sniper_budget = temp_plan.get('one_portion', 0.0)
+                                                sniper_budget = float(temp_plan.get('one_portion') or 0.0)
                                                 
                                                 exec_price = min(c_close, tracking_info['armed_price'])
                                                 
@@ -218,7 +221,7 @@ async def scheduled_sniper_monitor(context):
                                                     
                                                     for attempt in range(3):
                                                         if rem_qty <= 0: hunt_success = True; break
-                                                        ask_price = await asyncio.to_thread(broker.get_ask_price, t)
+                                                        ask_price = float(await asyncio.to_thread(broker.get_ask_price, t) or 0.0)
                                                         safe_ask_price = ask_price if ask_price > 0 else c_close
                                                         final_exec_price = min(safe_ask_price, tracking_info['armed_price'])
                                                         
@@ -253,7 +256,7 @@ async def scheduled_sniper_monitor(context):
                         
                         for attempt in range(3):
                             if rem_qty <= 0: hunt_success = True; break
-                            bid_price = await asyncio.to_thread(broker.get_bid_price, t)
+                            bid_price = float(await asyncio.to_thread(broker.get_bid_price, t) or 0.0)
                             if bid_price > 0 and bid_price >= target_price:
                                 res = broker.send_order(t, "SELL", rem_qty, bid_price, "LIMIT")
                                 if res.get('rt_cd') == '0':
@@ -272,7 +275,7 @@ async def scheduled_sniper_monitor(context):
                 
                 if is_rev:
                     q_qty = max(4, math.floor(qty / sell_divisor)) if qty >= 4 else qty
-                    ma_5day = await asyncio.to_thread(broker.get_5day_ma, t)
+                    ma_5day = float(await asyncio.to_thread(broker.get_5day_ma, t) or 0.0)
                     base_trigger = round(ma_5day, 2) if ma_5day > 0 else (math.ceil(avg_price * 100) / 100.0)
                 else:
                     safe_floor_price = math.ceil(avg_price * 1.005 * 100) / 100.0
@@ -313,7 +316,7 @@ async def scheduled_sniper_monitor(context):
                         
                         for attempt in range(3):
                             if rem_qty <= 0: hunt_success = True; break
-                            bid_price = await asyncio.to_thread(broker.get_bid_price, t)
+                            bid_price = float(await asyncio.to_thread(broker.get_bid_price, t) or 0.0)
                             if bid_price > 0 and bid_price >= intercept_price:
                                 res = broker.send_order(t, "SELL", rem_qty, bid_price, "LIMIT")
                                 if res.get('rt_cd') == '0':
@@ -374,6 +377,7 @@ async def scheduled_vwap_init_and_cancel(context):
         logging.error(f"🚨 VWAP Fail-Safe 초기화 에러: {e}")
 # ==========================================================
 # [scheduler_trade.py] (2부 / 2부)
+# 💡 [V24.09 패치] 후반부 로직 통신 결측치(None) Safe Casting 전면 이식 완료
 # ==========================================================
 
 # ==========================================================
@@ -426,8 +430,9 @@ async def scheduled_vwap_trade(context):
                     queue_ledger = app_data.get('queue_ledger')
                     if not strategy_rev or not queue_ledger: continue
                     
-                    curr_p = await asyncio.to_thread(broker.get_current_price, t)
-                    prev_c = await asyncio.to_thread(broker.get_previous_close, t)
+                    # 💡 [핵심 수술] 현재가/전일종가 Safe Casting
+                    curr_p = float(await asyncio.to_thread(broker.get_current_price, t) or 0.0)
+                    prev_c = float(await asyncio.to_thread(broker.get_previous_close, t) or 0.0)
                     if curr_p <= 0 or prev_c <= 0: continue
                     
                     # ==========================================================
@@ -463,7 +468,8 @@ async def scheduled_vwap_trade(context):
                             await asyncio.to_thread(broker.cancel_all_orders_safe, t, "SELL")
                             await asyncio.sleep(0.5)
                             
-                            bid_price = await asyncio.to_thread(broker.get_bid_price, t)
+                            # 💡 [핵심 수술] 호가 Safe Casting
+                            bid_price = float(await asyncio.to_thread(broker.get_bid_price, t) or 0.0)
                             exec_price = bid_price if bid_price > 0 else curr_p
                             
                             res = broker.send_order(t, "SELL", target_sweep_qty, exec_price, "LIMIT")
@@ -525,7 +531,7 @@ async def scheduled_vwap_trade(context):
                     if vwap_cache.get(f"REV_{t}_loc_fired"):
                         continue
 
-                    rev_daily_budget = cfg.get_seed(t) * 0.15
+                    rev_daily_budget = float(cfg.get_seed(t) or 0.0) * 0.15
                     
                     rev_plan = strategy_rev.get_dynamic_plan(
                         ticker=t, curr_p=curr_p, prev_c=prev_c, 
@@ -553,8 +559,9 @@ async def scheduled_vwap_trade(context):
                         target_price = o['price']
                         side = o['side']
                         
-                        ask_price = await asyncio.to_thread(broker.get_ask_price, t)
-                        bid_price = await asyncio.to_thread(broker.get_bid_price, t)
+                        # 💡 [핵심 수술] 호가 Safe Casting
+                        ask_price = float(await asyncio.to_thread(broker.get_ask_price, t) or 0.0)
+                        bid_price = float(await asyncio.to_thread(broker.get_bid_price, t) or 0.0)
                         exec_price = ask_price if side == "BUY" else bid_price
                         if exec_price <= 0: exec_price = curr_p
                         
@@ -600,15 +607,16 @@ async def scheduled_vwap_trade(context):
                     is_rev = cfg.get_reverse_state(t).get("is_active", False)
                     if is_rev: continue
                         
-                    h = holdings.get(t, {'qty': 0, 'avg': 0})
+                    h = holdings.get(t) or {}
                     actual_qty = int(float(h.get('qty') or 0))
                     
-                    prev_c_for_fix = await asyncio.to_thread(broker.get_previous_close, t)
+                    # 💡 [핵심 수술] Safe Casting
+                    prev_c_for_fix = float(await asyncio.to_thread(broker.get_previous_close, t) or 0.0)
                     actual_avg = (prev_c_for_fix * 1.15) if actual_qty == 0 else float(h.get('avg') or 0.0)
                     
-                    curr_p = await asyncio.to_thread(broker.get_current_price, t)
-                    prev_c = await asyncio.to_thread(broker.get_previous_close, t)
-                    ma_5day = await asyncio.to_thread(broker.get_5day_ma, t)
+                    curr_p = float(await asyncio.to_thread(broker.get_current_price, t) or 0.0)
+                    prev_c = float(await asyncio.to_thread(broker.get_previous_close, t) or 0.0)
+                    ma_5day = float(await asyncio.to_thread(broker.get_5day_ma, t) or 0.0)
                     if curr_p <= 0: continue
                     
                     try:
@@ -619,7 +627,7 @@ async def scheduled_vwap_trade(context):
                     
                     plan = strategy.get_plan(
                         t, curr_p, actual_avg, actual_qty, prev_c, ma_5day=ma_5day,
-                        market_type="REG", available_cash=allocated_cash.get(t, 0), is_simulation=True
+                        market_type="REG", available_cash=allocated_cash.get(t, 0.0), is_simulation=True
                     )
                     
                     if f"{t}_plan_locked" not in vwap_cache:
@@ -640,7 +648,7 @@ async def scheduled_vwap_trade(context):
                                 elif o['type'] == 'LIMIT':
                                     jackpot_orders.append(o)
                                     
-                        vwap_cache[f"{t}_star_price"] = plan.get('star_price', 0.0)
+                        vwap_cache[f"{t}_star_price"] = float(plan.get('star_price', 0.0))
                         vwap_cache[f"{t}_actual_avg"] = actual_avg
                         vwap_cache[f"{t}_target_star_buy_budget"] = target_star_buy_budget
                         vwap_cache[f"{t}_target_avg_buy_budget"] = target_avg_buy_budget
@@ -698,7 +706,7 @@ async def scheduled_vwap_trade(context):
                         if p2['orders']: buy_qty += p2['orders'][0]['qty']
                         
                     if buy_qty > 0:
-                        ask_price = await asyncio.to_thread(broker.get_ask_price, t)
+                        ask_price = float(await asyncio.to_thread(broker.get_ask_price, t) or 0.0)
                         exec_price = ask_price if ask_price > 0 else curr_p
                         
                         valid_buy_qty = 0
@@ -753,7 +761,7 @@ async def scheduled_vwap_trade(context):
                         
                         if vwap_sell_plan['orders']:
                             for o in vwap_sell_plan['orders']:
-                                bid_price = await asyncio.to_thread(broker.get_bid_price, t)
+                                bid_price = float(await asyncio.to_thread(broker.get_bid_price, t) or 0.0)
                                 exec_price = bid_price if bid_price > 0 else o['price']
                                 
                                 if exec_price >= star_price: 
@@ -813,17 +821,19 @@ async def scheduled_emergency_liquidation(context):
                 total_q = sum(item.get("qty", 0) for item in q_data)
                 if total_q == 0: continue
 
-                rev_daily_budget = cfg.get_seed(t) * 0.15
+                rev_daily_budget = float(cfg.get_seed(t) or 0.0) * 0.15
+                safe_cash = float(cash or 0.0)
                 
-                if cash < (rev_daily_budget / 2.0):
+                if safe_cash < (rev_daily_budget / 2.0):
                     emergency_qty = strategy_rev.get_emergency_liquidation_qty(
                         alloc_cash=rev_daily_budget, 
-                        available_cash=cash, 
+                        available_cash=safe_cash, 
                         q_data=q_data
                     )
                     
                     if emergency_qty > 0:
-                        curr_p = await asyncio.to_thread(broker.get_current_price, t)
+                        # 💡 [핵심 수술] Safe Casting
+                        curr_p = float(await asyncio.to_thread(broker.get_current_price, t) or 0.0)
                         exec_price = max(0.01, curr_p * 0.99) 
                         
                         res = broker.send_order(t, "SELL", emergency_qty, exec_price, "LIMIT")
@@ -892,13 +902,14 @@ async def scheduled_regular_trade(context):
             for t in sorted_tickers:
                 if cfg.check_lock(t, "REG"): continue
                 
-                h = holdings.get(t, {'qty': 0, 'avg': 0})
-                curr_p = await asyncio.to_thread(broker.get_current_price, t)
-                prev_c = await asyncio.to_thread(broker.get_previous_close, t)
+                h = holdings.get(t) or {}
+                # 💡 [핵심 수술] 정규장 주문 변수 Safe Casting
+                curr_p = float(await asyncio.to_thread(broker.get_current_price, t) or 0.0)
+                prev_c = float(await asyncio.to_thread(broker.get_previous_close, t) or 0.0)
                 
                 if cfg.get_version(t) == "V_REV":
                     q_data = queue_ledger.get_queue(t)
-                    rev_budget = cfg.get_seed(t) * 0.15
+                    rev_budget = float(cfg.get_seed(t) or 0.0) * 0.15
                     
                     dummy_vwap = {"is_strong_up": True, "is_strong_down": True} 
                     
@@ -919,12 +930,12 @@ async def scheduled_regular_trade(context):
                     v_rev_tickers.append(t)
                     continue
                 
-                ma_5day = await asyncio.to_thread(broker.get_5day_ma, t)
+                ma_5day = float(await asyncio.to_thread(broker.get_5day_ma, t) or 0.0)
                 
                 safe_avg = float(h.get('avg') or 0.0)
                 safe_qty = int(float(h.get('qty') or 0))
                 
-                plan = strategy.get_plan(t, curr_p, safe_avg, safe_qty, prev_c, ma_5day=ma_5day, market_type="REG", available_cash=allocated_cash[t])
+                plan = strategy.get_plan(t, curr_p, safe_avg, safe_qty, prev_c, ma_5day=ma_5day, market_type="REG", available_cash=allocated_cash.get(t, 0.0))
                 plans[t] = plan
                 
                 if plan.get('core_orders', []) or plan.get('orders', []):
@@ -1017,7 +1028,8 @@ async def scheduled_after_market_lottery(context):
                 if cfg.get_version(t) != "V_REV":
                     continue
 
-                h = holdings.get(t, {'qty': 0, 'avg': 0})
+                h = holdings.get(t) or {}
+                # 💡 [핵심 수술] 수량 및 평단가 Safe Casting
                 qty = int(float(h.get('qty') or 0))
                 avg_price = float(h.get('avg') or 0.0)
 
