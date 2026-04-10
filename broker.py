@@ -1,6 +1,7 @@
 # ==========================================================
-# [broker.py]
-# ⚠️ 이 주석 및 파일명 표기는 절대 지우지 마세요.
+# [broker.py] (1부 / 2부) - 🌟 100% 통합 완성본 🌟
+# ⚠️ 수술 내역: 야후 파이낸스(yfinance) 좀비 스레드 누적 방지
+# 모든 history() 호출에 timeout=5 파라미터 강제 주입 완료
 # ==========================================================
 
 import requests
@@ -14,7 +15,7 @@ import pytz
 import tempfile
 import pandas as pd   
 import numpy as np
-import volatility_engine as ve  # 💡 [V3.1 수술] 동적 변동성 엔진 연결 (이중 가중치)
+import volatility_engine as ve  
 
 class KoreaInvestmentBroker:
     def __init__(self, app_key, app_secret, cano, acnt_prdt_cd="01"):
@@ -207,18 +208,34 @@ class KoreaInvestmentBroker:
             return cash, None
 
     def get_current_5min_candle(self, ticker):
-        """
-        현재 시점 기준으로 진행 중인 가장 최근 5분 단위의 OHLC 캔들과 거래량 데이터를 반환합니다.
-        (MA20 휩소 필터링을 위해 period를 2d로 확장하고 Volume 합산 도출)
-        """
         try:
             stock = yf.Ticker(ticker)
-            df = stock.history(period="2d", interval="1m", prepost=True)
+            # 💡 [수술] timeout=5 강제 주입
+            df = stock.history(period="5d", interval="1m", prepost=True, timeout=5)
             
             if df.empty:
                 return None
                 
-            resampled = df.resample('5min', label='left', closed='left').agg({
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.droplevel(1)
+                
+            df.index = df.index.tz_convert('America/New_York')
+            
+            regular_market = df.between_time('09:30', '15:59')
+            
+            if regular_market.empty:
+                return None
+                
+            typical_price = (regular_market['High'] + regular_market['Low'] + regular_market['Close']) / 3.0
+            vol_price = typical_price * regular_market['Volume']
+            
+            cum_vol_price = vol_price.cumsum()
+            cum_vol = regular_market['Volume'].cumsum()
+            
+            vwap_series = cum_vol_price / cum_vol.replace(0, 1) 
+            current_vwap = float(vwap_series.iloc[-1]) if not vwap_series.empty else 0.0
+            
+            resampled = regular_market.resample('5min', label='left', closed='left').agg({
                 'Open': 'first',
                 'High': 'max',
                 'Low': 'min',
@@ -229,19 +246,25 @@ class KoreaInvestmentBroker:
             if resampled.empty:
                 return None
                 
-            resampled['Vol_MA20'] = resampled['Volume'].rolling(20).mean()
+            resampled['Vol_MA10'] = resampled['Volume'].rolling(10, min_periods=1).mean()
+            resampled['Vol_MA20'] = resampled['Volume'].rolling(20, min_periods=1).mean()
             
             last_candle = resampled.iloc[-1]
             
+            vol_ma10 = float(last_candle['Vol_MA10']) if not pd.isna(last_candle['Vol_MA10']) else float(last_candle['Volume'])
             vol_ma20 = float(last_candle['Vol_MA20']) if not pd.isna(last_candle['Vol_MA20']) else float(last_candle['Volume'])
+            
+            latest_1m = df.iloc[-1]
             
             return {
                 'open': float(last_candle['Open']),
-                'high': float(last_candle['High']),
-                'low': float(last_candle['Low']),
-                'close': float(last_candle['Close']),
-                'volume': float(last_candle['Volume']),
-                'vol_ma20': vol_ma20
+                'high': float(latest_1m['High']),  
+                'low': float(latest_1m['Low']),    
+                'close': float(latest_1m['Close']),
+                'volume': float(last_candle['Volume']), 
+                'vol_ma10': vol_ma10,
+                'vol_ma20': vol_ma20,
+                'vwap': current_vwap  
             }
         except Exception as e:
             print(f"⚠️ [Broker] 실시간 5분봉 캔들 조회 실패 ({ticker}): {e}")
@@ -251,7 +274,8 @@ class KoreaInvestmentBroker:
         try:
             stock = yf.Ticker(ticker)
             if is_market_closed: return float(stock.fast_info['last_price'])
-            hist = stock.history(period="1d", interval="1m", prepost=True)
+            # 💡 [수술] timeout=5 강제 주입
+            hist = stock.history(period="1d", interval="1m", prepost=True, timeout=5)
             if not hist.empty: return float(hist['Close'].iloc[-1])
             else: return float(stock.fast_info['last_price'])
         except Exception as e:
@@ -299,24 +323,27 @@ class KoreaInvestmentBroker:
 
     def get_previous_close(self, ticker):
         try:
-            df = yf.download(ticker, period="5d", interval="1m", prepost=True, progress=False)
-            if not df.empty:
-                if isinstance(df.columns, pd.MultiIndex):
-                    df.columns = df.columns.droplevel(1)
-                df.index = df.index.tz_convert('America/New_York')
-                now_est = datetime.datetime.now(pytz.timezone('America/New_York'))
-                if now_est.time() >= datetime.time(20, 0):
-                    last_completed_date = now_est.date()
+            stock = yf.Ticker(ticker)
+            # 💡 [수술] timeout=5 강제 주입
+            hist = stock.history(period="5d", timeout=5)
+            if not hist.empty:
+                est = pytz.timezone('US/Eastern')
+                now_est = datetime.datetime.now(est)
+                
+                cutoff_date = now_est.date()
+                if now_est.time() < datetime.time(16, 0):
+                    cutoff_date -= datetime.timedelta(days=1)
+                
+                if hist.index.tzinfo is None:
+                    hist.index = hist.index.tz_localize('UTC').tz_convert(est)
                 else:
-                    last_completed_date = now_est.date() - datetime.timedelta(days=1)
-                
-                df_full = df.between_time('04:00', '19:59')
-                past_df = df_full[df_full.index.date <= last_completed_date]
-                
-                if not past_df.empty:
-                    return float(past_df['Close'].iloc[-1])
+                    hist.index = hist.index.tz_convert(est)
+                    
+                past_hist = hist[hist.index.date <= cutoff_date]
+                if not past_hist.empty:
+                    return float(past_hist['Close'].iloc[-1])
         except Exception as e:
-            print(f"⚠️ [야후 파이낸스] 전일 애프터마켓 종가 에러, 한투 API 우회 가동: {e}")
+            print(f"⚠️ [야후 파이낸스] 전일 정규장 종가 파싱 에러, 한투 API 우회 가동: {e}")
 
         try:
             excg_cd = self._get_exchange_code(ticker, target_api="PRICE")
@@ -327,11 +354,11 @@ class KoreaInvestmentBroker:
         except Exception as e:
             print(f"❌ [한투 API] 전일종가 우회 조회 실패: {e}")
         return 0.0
-
     def get_5day_ma(self, ticker):
         try:
             stock = yf.Ticker(ticker)
-            hist = stock.history(period="10d") 
+            # 💡 [수술] timeout=5 강제 주입
+            hist = stock.history(period="10d", timeout=5) 
             if len(hist) >= 5: return float(hist['Close'][-5:].mean())
         except Exception as e:
             print(f"⚠️ [야후 파이낸스] MA5 에러, 한투 API 우회 가동: {e}")
@@ -391,11 +418,22 @@ class KoreaInvestmentBroker:
             time.sleep(5)
             
         final_orders = self.get_unfilled_orders_detail(ticker)
+        failed_orders = []
+        
         if side == "BUY":
-            return not any(o.get('sll_buy_dvsn_cd') == '02' for o in final_orders)
+            failed_orders = [o for o in final_orders if o.get('sll_buy_dvsn_cd') == '02']
         elif side == "SELL":
-            return not any(o.get('sll_buy_dvsn_cd') == '01' for o in final_orders)
-        return not bool(final_orders)
+            failed_orders = [o for o in final_orders if o.get('sll_buy_dvsn_cd') == '01']
+        else:
+            failed_orders = final_orders
+            
+        if failed_orders:
+            failed_odnos = [o.get('odno') for o in failed_orders]
+            error_msg = f"[FATAL ERROR] {ticker} 미체결 주문 취소 실패! (Double Spending 방어용 하드 락 발동). 미취소 ODNO: {failed_odnos}"
+            print(f"🚨 {error_msg}")
+            raise Exception(error_msg)
+            
+        return True
 
     def cancel_targeted_orders(self, ticker, side, target_ord_dvsn):
         sll_buy_cd = '02' if side == "BUY" else '01'
@@ -414,6 +452,38 @@ class KoreaInvestmentBroker:
             
         return len(target_orders)
 
+    def cancel_orders_by_price(self, ticker, side, target_prices):
+        sll_buy_cd = '02' if side == "BUY" else '01'
+        orders = self.get_unfilled_orders_detail(ticker)
+        if not orders: return 0
+        
+        target_orders = []
+        for o in orders:
+            if o.get('sll_buy_dvsn_cd') == sll_buy_cd:
+                raw_p1 = o.get('ft_ord_unpr3', 0)
+                raw_p2 = o.get('ord_unpr', 0)
+                raw_p3 = o.get('ovrs_ord_unpr', 0)
+                
+                o_price = 0.0
+                for rp in [raw_p1, raw_p2, raw_p3]:
+                    try:
+                        val = float(rp)
+                        if val > 0:
+                            o_price = val
+                            break
+                    except: pass
+
+                for tp in target_prices:
+                    if o_price > 0 and abs(o_price - tp) < 0.005: 
+                        target_orders.append(o)
+                        break
+                        
+        for o in target_orders:
+            self.cancel_order(ticker, o.get('odno'))
+            time.sleep(0.3)
+            
+        return len(target_orders)
+
     def send_order(self, ticker, side, qty, price, order_type="LIMIT"):
         tr_id = "TTTT1002U" if side == "BUY" else "TTTT1006U"
         excg_cd = self._get_exchange_code(ticker, target_api="ORDER")
@@ -422,6 +492,7 @@ class KoreaInvestmentBroker:
         elif order_type == "MOC": ord_dvsn = "33"
         elif order_type == "LOO": ord_dvsn = "02"
         elif order_type == "MOO": ord_dvsn = "31"
+        elif order_type == "AFTER_LIMIT": ord_dvsn = "34"  # 💡 [안전장치] 애프터마켓 지정가 지원
         else: ord_dvsn = "00"
 
         final_price = self._ceil_2(price)
@@ -576,32 +647,25 @@ class KoreaInvestmentBroker:
         return 0.0, ""
 
     def get_dynamic_sniper_target(self, index_ticker):
-        """
-        [V3.1+] 자율주행 동적 스나이퍼 타점 산출 (기초지수 1년 ATR 앵커 + 공포 가중치)
-        수동 가중치 및 고정 상수를 전면 폐기하고, volatility_engine을 호출하여 
-        기초지수 1년 ATR 기반의 3배수 동적 앵커와 실시간 공포 지수(VXN/HV) 기반 타격선을 반환합니다.
-        """
         try:
             class TargetFloat(float):
                 pass
             
             if index_ticker == "SOXX":
-                # SOXL (기초지수 SOXX)
                 hv_val, weight, target_drop, base_amp = ve.get_soxl_target_drop_full()
                 ret = TargetFloat(target_drop)
                 ret.metric_val = hv_val
                 ret.weight = weight
                 ret.base_amp = base_amp
-                ret.metric_name = "SOXX 자체 HV"
+                ret.metric_name = "SOXX HV"
                 ret.metric_base = round(hv_val / weight, 2) if weight > 0 else 25.0
             else:
-                # TQQQ (기초지수 QQQ, 공포지수 VXN)
                 vxn_val, weight, target_drop, base_amp = ve.get_tqqq_target_drop_full()
                 ret = TargetFloat(target_drop)
                 ret.metric_val = vxn_val
                 ret.weight = weight
                 ret.base_amp = base_amp
-                ret.metric_name = "프리마켓 VXN"
+                ret.metric_name = "실시간 VXN"
                 ret.metric_base = round(vxn_val / weight, 2) if weight > 0 else 20.0
             
             ret.is_panic = False
@@ -611,7 +675,6 @@ class KoreaInvestmentBroker:
             
         except Exception as e:
             print(f"⚠️ [Broker] V3.1 스나이퍼 타점 반환 실패 ({index_ticker}): {e}")
-            # 통신 실패 시 방어용 1년 롤링 ATR 기반 기본값 (SOXL: -8.79%, TQQQ: -4.95%)
             fallback_val = -8.79 if index_ticker == "SOXX" else -4.95
             ret = TargetFloat(fallback_val)
             ret.metric_val = 0.0
@@ -626,7 +689,8 @@ class KoreaInvestmentBroker:
     def get_day_high_low(self, ticker):
         try:
             stock = yf.Ticker(ticker)
-            hist = stock.history(period="1d", interval="1m", prepost=True)
+            # 💡 [수술] timeout=5 강제 주입
+            hist = stock.history(period="1d", interval="1m", prepost=True, timeout=5)
             if not hist.empty:
                 day_high = float(hist['High'].max())
                 day_low = float(hist['Low'].min())
@@ -649,12 +713,10 @@ class KoreaInvestmentBroker:
         return 0.0, 0.0
 
     def get_atr_data(self, ticker):
-        """
-        [V22.02] 실시간 ATR5 및 ATR14 (변동성 지표) 연산 모듈
-        """
         try:
             stock = yf.Ticker(ticker)
-            hist = stock.history(period="30d")
+            # 💡 [수술] timeout=5 강제 주입
+            hist = stock.history(period="30d", timeout=5)
             
             if hist.empty or len(hist) < 15:
                 return 0.0, 0.0

@@ -1,6 +1,7 @@
 # ==========================================================
-# [config.py]
-# ⚠️ 이 주석 및 파일명 표기는 절대 지우지 마세요.
+# [config.py] - Part 1
+# ⚠️ V_REV 도입에 따른 P매매 잔재 완벽 소각 버전
+# 💡 [V24.10 수술] 동적 에스크로 락다운 깃발(Flag) 제어 로직 추가
 # ==========================================================
 import json
 import os
@@ -26,7 +27,7 @@ class ConfigManager:
             "HISTORY": "data/manual_history.json",  
             "SPLIT": "data/split_config.json",
             "TICKER": "data/active_tickers.json",
-            "UPWARD_SNIPER": "data/upward_sniper.dat", # 가속모드 삭제, 상방 스나이퍼 추가
+            "UPWARD_SNIPER": "data/upward_sniper.json", 
             "SECRET_MODE": "data/secret_mode.dat",
             "PROFIT_CFG": "data/profit_config.json",
             "LOCKS": "data/trade_locks.json",
@@ -35,7 +36,8 @@ class ConfigManager:
             "VERSION_CFG": "data/version_config.json",
             "REVERSE_CFG": "data/reverse_config.json",
             "SNIPER_MULTIPLIER_CFG": "data/sniper_multiplier.json",
-            "SPLIT_HISTORY": "data/split_history.json" 
+            "SPLIT_HISTORY": "data/split_history.json"
+            # 💡 [핵심 수술] P_TRADE_DATA 경로 영구 삭제 완료
         }
         
         self.DEFAULT_SEED = {"SOXL": 6720.0, "TQQQ": 6720.0}
@@ -117,17 +119,26 @@ class ConfigManager:
         return self._load_json(self.FILES["LEDGER"], [])
 
     def get_escrow_cash(self, ticker):
-        locks = self._load_json(self.FILES["LOCKS"], {})
-        return float(locks.get(f"ESCROW_{ticker}", 0.0))
+        # 💡 [핵심 수술] 장부를 역순 탐색하여 '연속된 최근의 리버스 기록'만으로 에스크로 잔금 동적 산출 (과거 얽힘 버그 및 제논의 역설 완벽 방어)
+        ledger = self.get_ledger()
+        escrow = 0.0
+        for r in reversed(ledger):
+            if r.get('ticker') == ticker:
+                if r.get('is_reverse', False):
+                    if r['side'] == 'SELL':
+                        escrow += (r['qty'] * r['price'])
+                    elif r['side'] == 'BUY':
+                        escrow -= (r['qty'] * r['price'])
+                else:
+                    break
+        return max(0.0, float(escrow))
 
     def set_escrow_cash(self, ticker, amount):
-        locks = self._load_json(self.FILES["LOCKS"], {})
-        locks[f"ESCROW_{ticker}"] = float(amount)
-        self._save_json(self.FILES["LOCKS"], locks)
+        # 💡 [핵심 수술] 동적 산출로 변경되어 수동 덮어쓰기 로직 무효화 (데이터 무결성 방어)
+        pass
 
     def add_escrow_cash(self, ticker, amount):
-        current = self.get_escrow_cash(ticker)
-        self.set_escrow_cash(ticker, current + float(amount))
+        pass
 
     def clear_escrow_cash(self, ticker):
         locks = self._load_json(self.FILES["LOCKS"], {})
@@ -136,14 +147,32 @@ class ConfigManager:
             self._save_json(self.FILES["LOCKS"], locks)
 
     def get_total_locked_cash(self, exclude_ticker=None):
-        locks = self._load_json(self.FILES["LOCKS"], {})
+        # 💡 [핵심 수술] 모든 활성 종목의 동적 에스크로 잔액을 실시간 합산
         total = 0.0
-        for k, v in locks.items():
-            if k.startswith("ESCROW_"):
-                ticker_in_lock = k.replace("ESCROW_", "")
-                if ticker_in_lock != exclude_ticker:
-                    total += float(v)
+        try:
+            tickers = self.get_active_tickers()
+            for t in tickers:
+                if t != exclude_ticker:
+                    rev_state = self.get_reverse_state(t).get("is_active", False)
+                    if rev_state:
+                        total += self.get_escrow_cash(t)
+        except Exception:
+            pass
         return total
+
+    # 💡 [V24.10 수술] KIS 증거금 차감 동기화를 위한 주문 잠금 깃발 제어 로직
+    def get_order_locked(self, ticker):
+        locks = self._load_json(self.FILES["LOCKS"], {})
+        return locks.get(f"ORDER_LOCKED_{ticker}", False)
+
+    def set_order_locked(self, ticker, is_locked):
+        locks = self._load_json(self.FILES["LOCKS"], {})
+        if is_locked:
+            locks[f"ORDER_LOCKED_{ticker}"] = True
+        else:
+            if f"ORDER_LOCKED_{ticker}" in locks:
+                del locks[f"ORDER_LOCKED_{ticker}"]
+        self._save_json(self.FILES["LOCKS"], locks)
 
     def get_absolute_t_val(self, ticker, actual_qty, actual_avg_price):
         seed = self.get_seed(ticker)
@@ -171,7 +200,6 @@ class ConfigManager:
         ledger = self.get_ledger()
         target_recs = [r for r in ledger if r['ticker'] == ticker]
         
-        # 💡 [핵심 수술] 기존 역사가 존재하는 경우 파괴적 덮어쓰기 전면 차단
         if len(target_recs) > 0:
             print(f"⚠️ [보안 차단] {ticker}의 장부 기록이 이미 존재하여 파괴적 Genesis 덮어쓰기를 차단했습니다.")
             return
@@ -226,7 +254,6 @@ class ConfigManager:
         ledger = self.get_ledger()
         target_recs = [r for r in ledger if r['ticker'] == ticker]
         
-        # 💡 [핵심 수술] 파괴적 서킷 브레이커 철거! 장부가 비어있을 때만 INIT 스냅샷 안전하게 1회 추가
         if len(target_recs) > 0:
             print(f"⚠️ [보안 차단] {ticker}의 장부 기록이 이미 존재하여 파괴적 INIT 덮어쓰기를 차단했습니다.")
             return
@@ -250,12 +277,67 @@ class ConfigManager:
                 r['avg_price'] = actual_avg
             self._save_json(self.FILES["LEDGER"], ledger)
 
+    def calibrate_ledger_prices(self, ticker, target_date_str, exec_history):
+        if not exec_history:
+            return 0
+            
+        buy_qty = 0
+        buy_amt = 0.0
+        sell_qty = 0
+        sell_amt = 0.0
+        
+        for ex in exec_history:
+            side_cd = ex.get('sll_buy_dvsn_cd')
+            qty = int(float(ex.get('ft_ccld_qty', '0')))
+            price = float(ex.get('ft_ccld_unpr3', '0'))
+            
+            if qty > 0 and price > 0:
+                if side_cd == "02": 
+                    buy_qty += qty
+                    buy_amt += (qty * price)
+                elif side_cd == "01": 
+                    sell_qty += qty
+                    sell_amt += (qty * price)
+                    
+        actual_buy_price = round(buy_amt / buy_qty, 4) if buy_qty > 0 else 0.0
+        actual_sell_price = round(sell_amt / sell_qty, 4) if sell_qty > 0 else 0.0
+        
+        if actual_buy_price == 0.0 and actual_sell_price == 0.0:
+            return 0
+            
+        ledger = self.get_ledger()
+        changed_count = 0
+        
+        for r in ledger:
+            if r.get('ticker') == ticker and r.get('date') == target_date_str:
+                exec_id = str(r.get('exec_id', ''))
+                if 'INIT' in exec_id:
+                    continue
+                    
+                if r['side'] == 'BUY' and actual_buy_price > 0.0:
+                    if abs(r['price'] - actual_buy_price) >= 0.01:
+                        r['price'] = actual_buy_price
+                        changed_count += 1
+                elif r['side'] == 'SELL' and actual_sell_price > 0.0:
+                    if abs(r['price'] - actual_sell_price) >= 0.01:
+                        r['price'] = actual_sell_price
+                        changed_count += 1
+                        
+        if changed_count > 0:
+            self._save_json(self.FILES["LEDGER"], ledger)
+            
+        return changed_count
+
     def clear_ledger_for_ticker(self, ticker):
         ledger = self.get_ledger()
         remaining = [r for r in ledger if r['ticker'] != ticker]
         self._save_json(self.FILES["LEDGER"], remaining)
         self.set_reverse_state(ticker, False, 0, 0.0)
         self.clear_escrow_cash(ticker)
+# ==========================================================
+# [config.py] - Part 2
+# ⚠️ P매매 소각 완료 및 신규 V_REV 호환 버전
+# ==========================================================
 
     def calculate_holdings(self, ticker, records=None):
         if records is None:
@@ -481,7 +563,7 @@ class ConfigManager:
 
     def reset_locks(self):
         locks = self._load_json(self.FILES["LOCKS"], {})
-        surviving_locks = {k: v for k, v in locks.items() if k.startswith("ESCROW_")}
+        surviving_locks = {k: v for k, v in locks.items() if k.startswith("ESCROW_") or k.startswith("ORDER_LOCKED_")}
         self._save_json(self.FILES["LOCKS"], surviving_locks)
         
     def reset_lock_for_ticker(self, ticker):
@@ -534,12 +616,14 @@ class ConfigManager:
         d[t] = float(v)
         self._save_json(self.FILES["SNIPER_MULTIPLIER_CFG"], d)
 
-    # 💡 [핵심 수술] 가속모드 삭제 및 상방 스나이퍼 모드 함수 신설
-    def get_upward_sniper_mode(self):
-        return self._load_file(self.FILES["UPWARD_SNIPER"]) == 'True'
+    def get_upward_sniper_mode(self, ticker):
+        d = self._load_json(self.FILES["UPWARD_SNIPER"], {})
+        return d.get(ticker, False)
 
-    def set_upward_sniper_mode(self, v):
-        self._save_file(self.FILES["UPWARD_SNIPER"], str(v))
+    def set_upward_sniper_mode(self, ticker, v):
+        d = self._load_json(self.FILES["UPWARD_SNIPER"], {})
+        d[ticker] = bool(v)
+        self._save_json(self.FILES["UPWARD_SNIPER"], d)
 
     def get_secret_mode(self):
         return self._load_file(self.FILES["SECRET_MODE"]) == 'True'

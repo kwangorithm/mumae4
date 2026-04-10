@@ -1,16 +1,46 @@
 # ==========================================================
-# [telegram_view.py]
-# ⚠️ 이 주석 및 파일명 표기는 절대 지우지 마세요.
+# [telegram_view.py] - Part 1/2 부 (상반부)
+# ⚠️ V-REV 장부 강제 초기화 3중 경고 방어막 유지
+# 💡 [V24.15 대수술] 2대 코어(V14, V-REV) 체제 UI 최적화 및 V_VWAP 적출
 # ==========================================================
 import os
 import math
 import json
+import logging
 from PIL import Image, ImageDraw, ImageFont
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 class TelegramView:
     def __init__(self):
-        pass
+        # 💡 리눅스 서버(Ubuntu 등) 폰트 파일 시스템 전방위 추적 경로 확장
+        self.bold_font_paths = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+            "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+            "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+            "arialbd.ttf"
+        ]
+        self.reg_font_paths = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+            "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+            "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+            "arial.ttf"
+        ]
+
+    def _load_best_font(self, font_list, size):
+        for path in font_list:
+            try:
+                if os.path.exists(path):
+                    return ImageFont.truetype(path, size)
+            except:
+                continue
+        try:
+            return ImageFont.truetype("sans-serif", size)
+        except:
+            return ImageFont.load_default()
 
     def get_start_message(self, target_hour, season_icon, latest_version):
         init_time = f"{target_hour:02d}:00"
@@ -20,7 +50,7 @@ class TelegramView:
 
         return (
             f"🌌 <b>[ 인피니트 스노우볼 {latest_version} ]</b>\n" 
-            f"⚡ <b>동적 시계열 스나이퍼 & 무결성 엔진</b> \n\n"
+            f"💠 <b> V-REV 역추세 & V14 무매 퀀트 코어 </b>\n\n" 
             f"🕒 <b>[ 운영 스케줄 ({season_short}) ]</b>\n"
             f"🔹 6시간 간격 : 🔑 API 토큰 자동 갱신\n"
             f"🔹 {sync_time} : 📝 잔고 동기화 & 자동 복리\n"
@@ -45,13 +75,10 @@ class TelegramView:
             "⚠️ 주의: 강제 초기화할 항목을 선택하세요."
         )
         keyboard = []
-        
         for t in active_tickers:
             keyboard.append([InlineKeyboardButton(f"🔓 [{t}] 매매 잠금 해제", callback_data=f"RESET:LOCK:{t}")])
-            
         for t in active_tickers:
             keyboard.append([InlineKeyboardButton(f"🚨 [{t}] 리버스/장부 초기화", callback_data=f"RESET:REV:{t}")])
-            
         keyboard.append([InlineKeyboardButton("❌ 취소 및 닫기", callback_data="RESET:CANCEL")])
         return msg, InlineKeyboardMarkup(keyboard)
 
@@ -64,6 +91,22 @@ class TelegramView:
         keyboard = [
             [InlineKeyboardButton("✅ 네, 모두 초기화합니다", callback_data=f"RESET:CONFIRM:{ticker}")],
             [InlineKeyboardButton("❌ 아니오, 유지합니다", callback_data="RESET:MENU")]
+        ]
+        return msg, InlineKeyboardMarkup(keyboard)
+
+    def get_init_v_rev_confirm_menu(self, ticker):
+        msg = (
+            f"🛑 <b>[ 초긴급: {ticker} V-REV 장부 강제 초기화 ]</b>\n\n"
+            "이 버튼은 현재 쌓여있는 모든 정밀 LIFO 지층을 파괴하고 하나로 합칩니다. "
+            "실행 전 다음 <b>3가지 위험 요소</b>를 반드시 확인하세요:\n\n"
+            "1️⃣ <b>지층 붕괴:</b> 분할 매수된 모든 개별 로트가 하나의 거대 블록으로 강제 압축됩니다.\n"
+            "2️⃣ <b>전술 상실:</b> 최근 물량의 '전일 종가 익절' 타점이 소각되며, 전체 평단가 돌파 전까지 매도가 잠깁니다.\n"
+            "3️⃣ <b>용도 제한:</b> 수동 매매로 수량이 틀어졌거나, 최초 이관 시에만 사용하는 최후의 수단입니다.\n\n"
+            "⚠️ <b>정말로 모든 전략 지층을 삭제하고 초기화하시겠습니까?</b>"
+        )
+        keyboard = [
+            [InlineKeyboardButton("🔥 예, 위험을 인지하고 초기화합니다", callback_data=f"SET_INIT:EXEC_CONFIRM:{ticker}")],
+            [InlineKeyboardButton("❌ 아니오, 기존 지층을 유지합니다", callback_data="SETTLEMENT:BACK")]
         ]
         return msg, InlineKeyboardMarkup(keyboard)
 
@@ -120,7 +163,69 @@ class TelegramView:
             
         return msg, InlineKeyboardMarkup(keyboard) if keyboard else None
 
-    def create_sync_report(self, status_text, dst_text, cash, rp_amount, ticker_data, is_trade_active):
+    def get_queue_management_menu(self, ticker, q_data):
+        msg = f"🗄️ <b>[ {ticker} V-REV 큐(Queue) 정밀 타격 통제소 ]</b>\n\n"
+        msg += "▫️ 현재 장부에 적재된 날짜별 지층입니다.\n"
+        msg += "▫️ 🛡️ <b>표기된 지층만 수정/삭제가 가능합니다.</b>\n"
+        msg += "▫️ 수동 추가: <code>/add_q 종목명 YYYY-MM-DD 수량 평단가</code>\n\n"
+
+        keyboard = []
+        if not q_data:
+            msg += "텅 비어 있습니다. (0주)\n"
+        else:
+            sorted_q = sorted(q_data, key=lambda x: x.get('date', ''), reverse=True)
+            for i, item in enumerate(sorted_q):
+                floor = i + 1
+                date_str = item.get('date', 'Unknown')
+                short_date = date_str[2:10] if len(date_str) >= 10 else date_str 
+                qty = item.get('qty', 0)
+                price = item.get('price', 0.0)
+                lot_type = item.get('type', '')
+
+                if lot_type == "INIT_TRANSFERRED":
+                    btn_text = f"[{floor}] {short_date} | {qty}주 | ${price:.2f} 🔒(보호)"
+                    callback_data = "IGNORE"
+                else:
+                    btn_text = f"[{floor}] {short_date} | {qty}주 | ${price:.2f} ❌"
+                    callback_data = f"DEL_REQ:{ticker}:{date_str}"
+                
+                keyboard.append([InlineKeyboardButton(btn_text, callback_data=callback_data)])
+        
+        keyboard.append([InlineKeyboardButton("🔙 대시보드로 돌아가기", callback_data=f"REC:SYNC:{ticker}")])
+        return msg, InlineKeyboardMarkup(keyboard)
+
+    def get_queue_action_confirm_menu(self, ticker, target_date, qty, price):
+        short_date = target_date[:10] if len(target_date) >= 10 else target_date
+        msg = f"⚠️ <b>[ {ticker} 지층 안전 통제망 ]</b>\n\n"
+        msg += f"선택하신 <b>[{short_date}]</b> 지층을 제어합니다:\n"
+        msg += f"▫️ 현재 수량: <b>{qty}주</b>\n"
+        msg += f"▫️ 현재 평단: <b>${price:.2f}</b>\n\n"
+        msg += "원하시는 작업을 선택해 주십시오.\n"
+        msg += "<i>(✏️ 수정을 누르시면 봇이 새 값을 입력받기 위해 대기합니다.)</i>"
+
+        keyboard = [
+            [InlineKeyboardButton("✏️ 지층 정보 수정하기", callback_data=f"EDIT_Q:{ticker}:{target_date}")],
+            [InlineKeyboardButton("🗑️ 영구 삭제 (복구 불가)", callback_data=f"DEL_Q:{ticker}:{target_date}")],
+            [InlineKeyboardButton("🔙 취소 및 목록으로", callback_data=f"QUEUE:VIEW:{ticker}")]
+        ]
+        return msg, InlineKeyboardMarkup(keyboard)
+# ==========================================================
+# [telegram_view.py] - Part 2/2 부 (하반부)
+# ⚠️ V-REV 설정줄 숨김 및 종목 간 띄어쓰기(엔터) 간격 완벽 교정
+# 💡 [V24.15 대수술] 2대 코어(V14, V-REV) 체제 UI 최적화 및 V_VWAP 적출
+# ==========================================================
+
+    def create_sync_report(self, status_text, dst_text, cash, rp_amount, ticker_data, is_trade_active, p_trade_data=None):
+        # 💡 [핵심 수술] LOC 주문이 아직 들어가지 않은(is_locked가 False인) 종목의 필수 예산만 합산
+        total_required_budget = sum(
+            t_info.get('one_portion', 0.0) 
+            for t_info in ticker_data 
+            if not t_info.get('is_locked', False)
+        )
+        
+        # 💡 [핵심 수술] KIS 주문가능금액(cash)에서 미주문 필수 예산만 선제적 차감 (이중 차감 방어)
+        dynamic_rp_amount = max(0.0, cash - total_required_budget)
+        
         total_locked = sum(t_info.get('escrow', 0.0) for t_info in ticker_data)
         
         header_msg = f"📜 <b>[ 통합 지시서 ({status_text}) ]</b>\n📅 <b>{dst_text}</b>\n"
@@ -133,7 +238,7 @@ class TelegramView:
         else:
             header_msg += f"💵 주문가능금액: ${cash:,.2f}\n"
             
-        header_msg += f"🏛️ RP 투자권장: ${rp_amount:,.2f}\n"
+        header_msg += f"🏛️ RP 투자권장: ${dynamic_rp_amount:,.2f}\n"
         header_msg += "----------------------------\n\n"
         
         body_msg = ""
@@ -143,24 +248,22 @@ class TelegramView:
             t = t_info['ticker']
             v_mode = t_info['version']
             
-            if t_info['t_val'] > (t_info['split'] * 1.1):
+            if t_info.get('t_val', 0.0) > (t_info.get('split', 40.0) * 1.1):
                 body_msg += f"⚠️ <b>[🚨 시스템 긴급 경고: 비정상 T값 폭주 감지!]</b>\n"
                 body_msg += f"🔎 현재 T값(<b>{t_info['t_val']:.4f}T</b>)이 설정된 분할수(<b>{int(t_info['split'])}분할</b>) 초과했습니다!\n"
                 body_msg += f"💡 <b>원인 역산 추정:</b> 수동 매수로 수량이 급증했거나, '/seed' 시드머니 설정이 대폭 축소되었습니다.\n"
                 body_msg += f"🛡️ <b>가동 조치:</b> 마이너스 호가 차단용 절대 하한선($0.01) 방어막 가동 중!\n\n"
 
-            if v_mode == "V17":
-                v_mode_display = "V17 시크릿"
-                main_icon = "🦇"
-            elif v_mode == "V14":
-                v_mode_display = "무매4"
-                main_icon = "💎"
+            # 💡 [다이어트 완료] 오직 V-REV와 V14(디폴트) 2대 코어만 판별
+            if v_mode == "V_REV":
+                v_mode_display = "V_REV 역추세"
+                main_icon = "⚖️"
             else:
-                v_mode_display = "무매3"
+                v_mode_display = "무매4"
                 main_icon = "💎"
                 
             is_rev = t_info.get('is_reverse', False)
-            proc_status = t_info['plan'].get('process_status', '')
+            proc_status = t_info.get('plan', {}).get('process_status', '')
             tracking_info = t_info.get('tracking_info', {})
             
             if proc_status == "🩸리버스(긴급수혈)":
@@ -172,8 +275,12 @@ class TelegramView:
                 icon = "🩸" if proc_status == "🩸리버스(긴급수혈)" else "🔄"
                 body_msg += f"{icon} <b>[{t}] {v_mode_display} 리버스</b>\n"
                 body_msg += f"📈 진행: <b>{t_info['t_val']:.4f}T / {int(t_info['split'])}분할</b>\n"
+            elif v_mode == "V_REV":
+                bdg_txt = f"1회(1배수) 예산: ${t_info['one_portion']:,.0f}"
+                body_msg += f"{main_icon} <b>[{t}] {v_mode_display}</b>\n"
+                body_msg += f"📈 큐(Queue): <b>{t_info.get('v_rev_q_lots', 0)}개 로트 대기 중 (총 {t_info.get('v_rev_q_qty', 0)}주)</b>\n"
             else:
-                bdg_txt = f"당일 예산: ${t_info['one_portion']:,.0f}" if v_mode in ["V14", "V17"] else f"1회 매수금: ${t_info['one_portion']:,.0f}"
+                bdg_txt = f"당일 예산: ${t_info['one_portion']:,.0f}"
                 body_msg += f"{main_icon} <b>[{t}] {v_mode_display}</b>\n"
                 body_msg += f"📈 진행: <b>{t_info['t_val']:.4f}T / {int(t_info['split'])}분할</b>\n"
             
@@ -204,135 +311,114 @@ class TelegramView:
             icon = "🔺" if t_info['profit_amt'] >= 0 else "🔻"
             body_msg += f"{icon} 수익: {sign}{abs(t_info['profit_pct']):.2f}% ({sign}${abs(t_info['profit_amt']):,.2f})\n"
             
-            # 💡 [V22.10 패치] 1줄 압축 표출 완벽 복구 및 리버스 모드 스나이퍼 대기열 노출
             sniper_status_txt = t_info.get('upward_sniper', 'OFF')
             
-            if is_rev:
-                if v_mode == "V17":
-                    body_msg += f"⚙️ 🌟 5일선 별지점: ${t_info['star_price']:.2f}\n"
-                else:
+            if v_mode != "V_REV":
+                if is_rev:
                     body_msg += f"⚙️ 🌟 5일선 별지점: ${t_info['star_price']:.2f} | 🎯감시: {sniper_status_txt}\n"
-            else:
-                if v_mode == "V17":
-                    body_msg += f"⚙️ 🎯 {t_info['target']}% | ⭐ {t_info['star_pct']}%\n"
                 else:
                     body_msg += f"⚙️ 🎯 {t_info['target']}% | ⭐ {t_info['star_pct']}% | 🎯감시: {sniper_status_txt}\n"
-                
-            # 리버스 모드 포함하여 스나이퍼 대기선 표출 (V17 제외)
-            if sniper_status_txt == "ON" and v_mode != "V17":
-                if tracking_info.get('is_trailing', False):
-                    peak_price = tracking_info.get('peak_price', 0.0)
-                    trigger_price = tracking_info.get('trigger_price', 0.0)
-                    body_msg += f"🎯 상방 추적(${trigger_price:.2f}) 중 (고가: ${peak_price:.2f})\n"
-                else:
-                    safe_floor = math.ceil(t_info['avg'] * 1.005 * 100) / 100.0
-                    if is_rev:
-                        sn_target = safe_floor
+                    
+                if sniper_status_txt == "ON":
+                    if not is_trade_active:
+                        body_msg += f"🎯 상방 스나이퍼: 감시 종료 (장마감)\n"
+                    elif tracking_info.get('is_trailing', False):
+                        peak_price = tracking_info.get('peak_price', 0.0)
+                        trigger_price = tracking_info.get('trigger_price', 0.0)
+                        body_msg += f"🎯 상방 추적(${trigger_price:.2f}) 중 (고가: ${peak_price:.2f})\n"
                     else:
-                        sn_target = max(t_info['star_price'], safe_floor)
-                        
-                    if sn_target > 0:
-                        body_msg += f"🎯 상방 스나이퍼: ${sn_target:.2f} 이상 대기\n"
+                        if is_rev:
+                            sn_target = t_info['star_price']
+                        else:
+                            safe_floor = math.ceil(t_info['avg'] * 1.005 * 100) / 100.0
+                            sn_target = max(t_info['star_price'], safe_floor)
+                            
+                        if sn_target > 0:
+                            body_msg += f"🎯 상방 스나이퍼: ${sn_target:.2f} 이상 대기\n"
             
-            hybrid_target = t_info.get('hybrid_target', 0.0)
-            sniper_pct = t_info.get('sniper_trigger', 0.0) 
-            secret_quarter_target = t_info.get('secret_quarter_target', 0.0)
+            # 💡 [다이어트 완료] V_VWAP 표출 텍스트 소각
+            elif v_mode == "V_REV":
+                body_msg += f"⚖️ <b>역추세 LIFO 큐(Queue) 엔진 스탠바이</b>\n"
+                body_msg += f"⏱️ <b>VWAP 스케줄:</b> 15:30 EST 앵커 세팅 ➔ 1분 단위 교차 타격\n"
             
-            if v_mode == "V17":
-                if "가로채기" in proc_status:
-                    hit_price = tracking_info.get('hit_price', 0.0)
-                    lowest = tracking_info.get('lowest_price', 0.0)
+            if v_mode == "V_REV":
+                body_msg += f"📋 <b>[주문 가이던스 - ⚖️다중 LIFO 제어]</b>\n"
+                
+                qty = t_info.get('qty', 0)
+                alloc_cash = t_info.get('one_portion', 0.0)
+                prev_c = t_info.get('prev_close', 0.0)
+                
+                if qty == 0 and alloc_cash > 0 and prev_c > 0:
+                    p1_trigger = round(prev_c * 1.15, 2)
+                    p2_trigger = round(prev_c * 0.975, 2)
+                    b1_budget = alloc_cash * 0.5
+                    b2_budget = alloc_cash * 0.5
                     
-                    if hit_price == 0.0:
-                        cache_file = f"data/sniper_cache_{t}.json"
-                        if os.path.exists(cache_file):
-                            try:
-                                with open(cache_file, 'r') as f:
-                                    c_data = json.load(f)
-                                    hit_price = c_data.get('hit_price', 0.0)
-                                    lowest = c_data.get('lowest_price', 0.0)
-                            except: pass
+                    q1 = math.floor(b1_budget / p1_trigger) if p1_trigger > 0 else 0
+                    q2 = math.floor(b2_budget / p2_trigger) if p2_trigger > 0 else 0
                     
-                    if hit_price > 0 and lowest > 0:
-                        bounce_pct = ((hit_price - lowest) / lowest) * 100
-                        body_msg += f"💥 <b>명중: ${hit_price:.2f} (${lowest:.2f} 대비 +{bounce_pct:.2f}%)</b>\n"
-                    else:
-                        body_msg += f"💥 <b>스나이퍼: 명중 완료</b>\n"
-                        
-                elif tracking_info.get('is_trailing', False):
-                    peak_price = tracking_info.get('peak_price', 0.0)
-                    trigger_price = tracking_info.get('trigger_price', 0.0)
-                    body_msg += f"🎯 <b>쿼터 추적(${trigger_price:.2f}) 중 (고가: ${peak_price:.2f})</b>\n"
-                    
-                elif tracking_info.get('is_tracking', False):
-                    lowest = tracking_info.get('lowest_price', 0.0)
-                    trigger_val = 1.5 if t == "SOXL" else 1.0
-                    body_msg += f"🎯 <b>장전선 이탈! 장중 바닥 추적 중</b>\n  <b>(최저: ${lowest:.2f} / 목표반등: +{trigger_val}%)</b>\n"
-                    
-                elif hybrid_target > 0:
-                    body_msg += f"📉 <b>스나이퍼: {sniper_pct:.2f}% 진폭(TR) 대기</b>\n"
-                    
+                    body_msg += f" 🔵 매도(Pop): 대기 물량 없음 (관망)\n"
+                    body_msg += f" 🔴 매수1(Buy1): <b>${p1_trigger:.2f}</b> 진입 시 {q1}주\n"
+                    body_msg += f" 🔴 매수2(Buy2): <b>${p2_trigger:.2f}</b> 진입 시 {q2}주\n"
                 else:
-                    body_msg += f"📉 <b>스나이퍼: 장전 대기 중</b>\n"
+                    raw_guidance = t_info.get('v_rev_guidance', " (가이던스 대기 중)")
+                    raw_guidance = raw_guidance.rstrip('\n')
+                    body_msg += raw_guidance + "\n"
                 
-                if secret_quarter_target > 0 and not tracking_info.get('is_trailing', False):
-                    body_msg += f"🦇 <b>쿼터 스나이퍼: ${secret_quarter_target:.2f} 이상 대기</b>\n"
-
-            body_msg += f"📋 <b>[주문 계획 - {proc_status}]</b>\n"
-            
-            if t_info['plan']['orders']:
-                jup_orders = [o for o in t_info['plan']['orders'] if "줍줍" in o['desc']]
-                n_orders = [o for o in t_info['plan']['orders'] if "줍줍" not in o['desc']]
-
-                for o in n_orders:
-                    ico = "🔴" if o['side'] == 'BUY' else "🔵"
-                    desc = o['desc']
-                    
-                    if "수혈" in desc: 
-                        ico = "🩸"
-                        desc = desc.replace("🩸", "")
-                    elif "시크릿" in desc: 
-                        ico = "🦇"
-                        desc = desc.replace("🦇", "")
+                if alloc_cash > 0 and prev_c > 0:
+                    p2_trigger = round(prev_c * 0.975, 2)
+                    if p2_trigger > 0:
+                        b2_budget = alloc_cash * 0.5
+                        q2 = math.floor(b2_budget / p2_trigger)
                         
-                    type_str = "" if o['type'] == 'LIMIT' else f"({o['type']})"
-                    type_disp = f" {type_str}" if type_str else ""
-                    
-                    body_msg += f" {ico} {desc}: <b>${o['price']} x {o['qty']}주</b>{type_disp}\n"
-
-                if jup_orders:
-                    prices = sorted([o['price'] for o in jup_orders], reverse=True)
-                    body_msg += f" 🧹 줍줍({len(jup_orders)}개): <b>${prices[0]} ~ ${prices[-1]} (LOC)</b>\n"
-                
-                if is_trade_active:
-                    if t_info['is_locked']: body_msg += f" (✅ 금일 주문 완료/잠금)\n"
-                    else: keyboard.append([InlineKeyboardButton(f"🚀 {t} 주문 실행", callback_data=f"EXEC:{t}")])
+                        grid_start = round(b2_budget / (q2 + 1), 2)
+                        grid_end = round(b2_budget / (q2 + 5), 2)
+                        
+                        if grid_start >= 0.01 and grid_start < p2_trigger:
+                            grid_end = max(grid_end, 0.01)
+                            body_msg += f" 🧹 줍줍(5개): <b>${grid_start:.2f} ~ ${grid_end:.2f} (LOC)</b>\n"
             else:
-                body_msg += f" 💤 주문 없음 (관망/예산소진)\n"
-            
-            if v_mode != "V17":
-                dyn_obj = t_info.get('dynamic_obj')
-                if dyn_obj is not None and hasattr(dyn_obj, 'metric_val'):
-                    m_val = dyn_obj.metric_val
-                    m_base = float(dyn_obj.metric_base)
-                    weight = dyn_obj.weight
-                    target_drop = abs(float(dyn_obj))
-                    base_amp = abs(dyn_obj.base_amp) if hasattr(dyn_obj, 'base_amp') else (8.79 if t == "SOXL" else 4.95)
+                body_msg += f"📋 <b>[주문 계획 - {proc_status}]</b>\n"
+                plan_orders = t_info.get('plan', {}).get('orders', [])
+                if plan_orders:
+                    jup_orders = [o for o in plan_orders if "줍줍" in o['desc']]
+                    n_orders = [o for o in plan_orders if "줍줍" not in o['desc']]
+    
+                    for o in n_orders:
+                        ico = "🔴" if o['side'] == 'BUY' else "🔵"
+                        desc = o['desc']
+                        
+                        if "수혈" in desc: 
+                            ico = "🩸"
+                            desc = desc.replace("🩸", "")
+                            
+                        type_str = "" if o['type'] == 'LIMIT' else f"({o['type']})"
+                        type_disp = f" {type_str}" if type_str else ""
+                        
+                        body_msg += f" {ico} {desc}: <b>${o['price']} x {o['qty']}주</b>{type_disp}\n"
+    
+                    if jup_orders:
+                        prices = sorted([o['price'] for o in jup_orders], reverse=True)
+                        body_msg += f" 🧹 줍줍({len(jup_orders)}개): <b>${prices[0]} ~ ${prices[-1]} (LOC)</b>\n"
+                    
+                    if is_trade_active:
+                        if t_info.get('is_locked', False): body_msg += f" (✅ 금일 주문 완료/잠금)\n"
+                        else: keyboard.append([InlineKeyboardButton(f"🚀 {t} 주문 실행", callback_data=f"EXEC:{t}")])
                 else:
-                    m_val = 0.0
-                    m_base = 0.0
-                    weight = 0.0
-                    target_drop = t_info.get('sniper_trigger', 0.0)
-                    base_amp = 8.79 if t == "SOXL" else 4.95
-
-                body_msg += f"\n📡 <b>[ 스나이퍼 엔진 레이더 (관측 모드) ]</b>\n"
-                body_msg += f"▫️ <b>시장 진단</b> : 현재 변동성({m_val:.2f})이 1년 평균({m_base:.2f}) 대비 {weight:.2f}배 높습니다.\n"
-                body_msg += f"▫️ <b>동적 타격선</b> : 1년 ATR 앵커({base_amp:.2f}%)에 가중치를 적용, 당일 고점 대비 <b>-{target_drop:.2f}%</b> 하락 시 폭락으로 규정합니다.\n"
-                body_msg += f"▫️ <b>바닥 조건</b> : 타격선(-{target_drop:.2f}%) 이탈 후 세력의 거래량과 양봉 반등이 확인되는 시점을 시스템 상 최적의 진입 타점으로 계산합니다.\n"
-            
+                    body_msg += f" 💤 주문 없음 (관망/예산소진)\n"
+                
             body_msg += "\n"
 
         final_msg = header_msg + body_msg
+
+        vol_summaries = []
+        for t_info in ticker_data:
+            if 'vol_weight' in t_info and 'vol_status' in t_info:
+                vol_summaries.append(f"{t_info['ticker']}: {t_info['vol_weight']} ({t_info['vol_status']})")
+        
+        if vol_summaries:
+            final_msg += "📊 <b>[자율지표]</b> " + " | ".join(vol_summaries) + "\n<i>(상세: /mode)</i>\n\n"
+
         if not is_trade_active: final_msg += "⛔ 장마감/애프터마켓: 주문 불가"
         return final_msg, InlineKeyboardMarkup(keyboard) if keyboard else None
 
@@ -340,21 +426,16 @@ class TelegramView:
         msg = "⚙️ <b>[ 현재 설정 및 복리 상태 ]</b>\n\n"
         keyboard = []
         
-        if dynamic_target_data is None:
-            dynamic_target_data = {}
-        
         for t in active_tickers:
             ver = config.get_version(t)
             
-            if ver == "V17":
-                icon = "🦇"
-                ver_display = "V17 시크릿"
-            elif ver == "V14":
-                icon = "💎"
-                ver_display = "무매4"
+            # 💡 [다이어트 완료] V14, V-REV 2대 코어만 판별
+            if ver == "V_REV":
+                icon = "⚖️"
+                ver_display = "V_REV 역추세"
             else:
                 icon = "💎"
-                ver_display = "무매3"
+                ver_display = "무매4"
                 
             split_cnt = int(config.get_split_count(t))
             target_pct = config.get_target_profit(t)
@@ -363,43 +444,31 @@ class TelegramView:
             msg += f"{icon} <b>{t} ({ver_display} 모드)</b>\n"
             msg += f"▫️ 분할: {split_cnt}회\n▫️ 목표: {target_pct}%\n▫️ 자동복리: {comp_rate}%\n"
             
-            if ver == "V17":
-                atr5, atr14 = atr_data.get(t, (0.0, 0.0))
-                target_obj = dynamic_target_data.get(t)
-                
-                if target_obj is not None and hasattr(target_obj, 'metric_val'):
-                    m_val = target_obj.metric_val
-                    m_name = target_obj.metric_name
-                    m_base = float(target_obj.metric_base)
-                    weight = target_obj.weight
-                    base_amp = abs(target_obj.base_amp)
-                    final_amp = abs(float(target_obj))
-                    
-                    msg += f"📊 <b>실시간 동적 변동성 (V3.1 스나이퍼):</b>\n"
-                    msg += f"▫️ ATR5 ({atr5:.1f}%) / ATR14 ({atr14:.1f}%)\n"
-                    msg += f"▫️ {m_name}: {m_val:.2f} / {m_base:.2f}\n"
-                    msg += f"▫️ 타격선: {base_amp:.2f}% x {weight:.2f}배 (-{final_amp:.2f}%)\n\n"
-                else:
-                    base_amp = 8.79 if t == "SOXL" else 4.95
-                    msg += f"📊 <b>실시간 동적 변동성 (V3.1 스나이퍼):</b>\n"
-                    msg += f"▫️ ATR5 ({atr5:.1f}%) / ATR14 ({atr14:.1f}%)\n"
-                    msg += f"▫️ 지표 연산 실패 (기본값 방어 가동 중)\n"
-                    msg += f"▫️ 타격선: {base_amp:.2f}% x 1.00배 (-{base_amp:.2f}%)\n\n"
+            if ver == "V_REV":
+                msg += f"⚖️ <b>역추세(Reversion) 하이브리드 엔진 스탠바이:</b>\n"
+                msg += f"▫️ 전일 종가 앵커 기준 LIFO 큐 교차 매매 대기 중\n\n"
+                row_init = [InlineKeyboardButton(f"🔌 {t} V-REV 큐 장부 초기화 (물량이관)", callback_data=f"SET_INIT:V_REV:{t}")]
+                keyboard.append(row_init)
             else:
                 msg += "\n"
                 
+            # 💡 [다이어트 완료] V14 무매4 전환 버튼 단일 유지
             row1 = [
-                InlineKeyboardButton(f"⚙️ {t} 분할", callback_data=f"INPUT:SPLIT:{t}"), 
-                InlineKeyboardButton(f"🎯 {t} 목표", callback_data=f"INPUT:TARGET:{t}"),
-                InlineKeyboardButton(f"💸 {t} 복리", callback_data=f"INPUT:COMPOUND:{t}")
+                InlineKeyboardButton("💎 V14 (무매4)", callback_data=f"SET_VER:V14:{t}")
             ]
             keyboard.append(row1)
             
             row2 = [
-                InlineKeyboardButton(f"🔄 {t} 무매3/무매4 전환", callback_data=f"TOGGLE:VERSION:{t}"),
-                InlineKeyboardButton(f"✂️ {t} 액면보정", callback_data=f"INPUT:STOCK_SPLIT:{t}")
+                InlineKeyboardButton(f"⚙️ {t} 분할", callback_data=f"INPUT:SPLIT:{t}"), 
+                InlineKeyboardButton(f"🎯 {t} 목표", callback_data=f"INPUT:TARGET:{t}"),
+                InlineKeyboardButton(f"💸 {t} 복리", callback_data=f"INPUT:COMPOUND:{t}")
             ]
             keyboard.append(row2)
+            
+            row3 = [
+                InlineKeyboardButton(f"✂️ {t} 액면보정", callback_data=f"INPUT:STOCK_SPLIT:{t}")
+            ]
+            keyboard.append(row3)
             
         return msg, InlineKeyboardMarkup(keyboard)
 
@@ -455,8 +524,10 @@ class TelegramView:
         if not is_history:
             other = "TQQQ" if ticker == "SOXL" else "SOXL"
             keyboard.append([InlineKeyboardButton(f"🔄 {other} 장부 조회", callback_data=f"REC:VIEW:{other}")])
+            keyboard.append([InlineKeyboardButton(f"🗄️ {ticker} V-REV 큐(Queue) 정밀 관리", callback_data=f"QUEUE:VIEW:{ticker}")])
             keyboard.append([InlineKeyboardButton("🔙 장부 대시보드 업데이트", callback_data=f"REC:SYNC:{ticker}")])
         else:
+            keyboard.append([InlineKeyboardButton("🖼️ 프리미엄 졸업 카드 발급", callback_data=f"HIST:IMG:{ticker}")])
             keyboard.append([InlineKeyboardButton("🔙 역사 목록으로 돌아가기", callback_data="HIST:LIST")])
 
         return msg, InlineKeyboardMarkup(keyboard)
@@ -464,8 +535,10 @@ class TelegramView:
     def create_profit_image(self, ticker, profit, yield_pct, invested, revenue, end_date):
         W, H = 600, 920 
         IMG_H = 430 
-        img = Image.new('RGB', (W, H), color='#121212')
+        
+        img = Image.new('RGB', (W, H), color='#1E222D')
         draw = ImageDraw.Draw(img)
+        
         try:
             if os.path.exists("background.png"):
                 bg = Image.open("background.png").convert("RGB")
@@ -477,33 +550,41 @@ class TelegramView:
                     new_h = int(W / bg_ratio)
                     bg = bg.resize((W, new_h), Image.Resampling.LANCZOS).crop((0, (new_h - IMG_H) // 2, W, (new_h + IMG_H) // 2))
                 img.paste(bg, (0, 0))
-        except: draw.rectangle([0, 0, W, IMG_H], fill="#252525")
+            else:
+                draw.rectangle([0, 0, W, IMG_H], fill="#111217")
+        except: 
+            draw.rectangle([0, 0, W, IMG_H], fill="#111217")
 
-        try:
-            f_p = ImageFont.truetype("arial.ttf", 85)
-            f_y = ImageFont.truetype("arial.ttf", 45)
-            f_b = ImageFont.truetype("arial.ttf", 35)
-        except: f_p = f_y = f_b = ImageFont.load_default()
+        f_title = self._load_best_font(self.bold_font_paths, 65)
+        f_p = self._load_best_font(self.bold_font_paths, 85)
+        f_y = self._load_best_font(self.reg_font_paths, 40)
+        f_b_val = self._load_best_font(self.bold_font_paths, 32)
+        f_b_lbl = self._load_best_font(self.reg_font_paths, 22)
 
-        y = IMG_H + 50
-        draw.text((W/2, y), ticker, font=f_b, fill="white", anchor="mm")
-        y += 100
-        color = "#FF453A" if profit < 0 else "#30D158"
+        y_title = IMG_H + 60
+        draw.rectangle([W/2 - 140, y_title - 45, W/2 + 140, y_title + 45], fill="#2A2F3D")
+        draw.text((W/2, y_title), f"{ticker}", font=f_title, fill="white", anchor="mm")
+        
+        color = "#007AFF" if profit < 0 else "#FF3B30"
         sign = "-" if profit < 0 else "+"
-        draw.text((W/2, y), f"{sign}${abs(profit):,.2f}", font=f_p, fill=color, anchor="mm")
-        y += 75
-        draw.text((W/2, y), f"{sign}{abs(yield_pct):,.2f}", font=f_y, fill=color, anchor="mm")
         
-        y += 110
-        draw.rectangle([40, y, 290, y + 110], fill="#1C1C1E")
-        draw.text((165, y + 35), f"${invested:,.2f}", font=f_b, fill="white", anchor="mm")
-        draw.text((165, y + 75), "Total Invested", font=f_b, fill="#8E8E93", anchor="mm")
+        y_profit = y_title + 105
+        draw.text((W/2, y_profit), f"{sign}${abs(profit):,.2f}", font=f_p, fill=color, anchor="mm")
         
-        draw.rectangle([310, y, 560, y + 110], fill="#1C1C1E")
-        draw.text((435, y + 35), f"${revenue:,.2f}", font=f_b, fill="white", anchor="mm")
-        draw.text((435, y + 75), "Total Revenue", font=f_b, fill="#8E8E93", anchor="mm")
+        y_yield = y_profit + 75
+        draw.text((W/2, y_yield), f"YIELD {sign}{abs(yield_pct):,.2f}%", font=f_y, fill=color, anchor="mm")
         
-        draw.text((W/2, H - 40), f"Graduation Date: {end_date}", font=f_b, fill="#636366", anchor="mm")
+        y_box = y_yield + 60
+        
+        draw.rectangle([40, y_box, 290, y_box + 100], fill="#2A2F3D")
+        draw.text((165, y_box + 35), f"${invested:,.2f}", font=f_b_val, fill="white", anchor="mm")
+        draw.text((165, y_box + 75), "TOTAL INVESTED", font=f_b_lbl, fill="#8E8E93", anchor="mm")
+        
+        draw.rectangle([310, y_box, 560, y_box + 100], fill="#2A2F3D")
+        draw.text((435, y_box + 35), f"${revenue:,.2f}", font=f_b_val, fill="white", anchor="mm")
+        draw.text((435, y_box + 75), "TOTAL REVENUE", font=f_b_lbl, fill="#8E8E93", anchor="mm")
+        
+        draw.text((W/2, H - 35), f"{end_date}", font=f_b_lbl, fill="#636366", anchor="mm")
         
         fname = f"data/profit_{ticker}.png"
         img.save(fname)
